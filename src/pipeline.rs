@@ -1212,6 +1212,9 @@ mod tests {
         );
         assert_eq!(cmd.last().unwrap(), "/tmp/p.part");
         assert_eq!(arg_after(&cmd, "-f"), Some("webm"));
+        // pas de `-avoid_negative_ts disabled` : il ramène la piste vidéo à 0 avec FFmpeg 4.4 (qui la décale de +7 ms à
+        // cause de l'audio Opus), mais le fichier devient alors impossible à parcourir dans Chromium
+        assert!(!cmd.iter().any(|a| a == "-avoid_negative_ts"));
         let two = Source {
             layout: Layout::TwoFiles,
             lens_files: vec!["a".into(), "b".into()],

@@ -134,8 +134,8 @@ function debouncedStab() { clearTimeout(stabTimer); stabTimer = setTimeout(fetch
 function frameLoop() {
   requestAnimationFrame(frameLoop);
   if (!viewer || !S.st) return;
-  const t = video.currentTime || 0;
   const moving = !video.paused && !video.ended;
+  const t = moving ? video.currentTime || 0 : pausedTime();
   if (moving || S.dirty || t !== S.lastT) {
     if (Math.abs(t - S.lastT) > 0.5 / S.fps && S.override && !moving) { /* changement de temps : la vue manuelle est abandonnée */ S.override = null; }
     if (moving && S.override) S.override = null;
@@ -167,9 +167,19 @@ function updateTimeUI() {
   }
 }
 
+// Instant courant à l'arrêt : celui (théorique, k / cadence) de l'image que le navigateur affiche, la dernière dont
+// l'horodatage est ≤ à `currentTime`. L'export prend l'image la plus proche de ce même instant : les deux concordent.
+function lastFrame() { return Math.max(0, Math.ceil(S.dur * S.fps - 1e-6) - 1); }
+function pausedTime() {
+  return Math.min(Math.floor((video.currentTime || 0) * S.fps + 1e-6), lastFrame()) / S.fps;
+}
+
+// Se placer sur l'image la plus proche de `t`, en visant le MILIEU de son intervalle d'affichage : pile sur son
+// horodatage, un arrondi (WebM : 1 ms ; 29,97 i/s : l'horodatage n'est jamais exact) ou le décalage de +7 ms que
+// FFmpeg 4.4 (Ubuntu 22.04) donne à la piste vidéo feraient afficher l'image précédente.
 function seek(t) {
-  t = Math.min(Math.max(0, t), Math.max(0, S.dur - 0.001));
-  video.currentTime = t;
+  const k = Math.min(Math.max(0, Math.round(t * S.fps)), lastFrame());
+  video.currentTime = (k + 0.5) / S.fps;
   S.dirty = true;
 }
 

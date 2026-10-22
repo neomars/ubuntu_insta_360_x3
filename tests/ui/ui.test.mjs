@@ -314,4 +314,34 @@ describe('interface X3 Studio Local', () => {
       page.errors.length = 0; // le navigateur journalise ces échecs voulus (401, lecture impossible)
     });
   });
+
+  it("à l'arrêt, l'aperçu montre à chaque image celle que donne l'export (29,97 i/s, pas à pas)", async () => {
+    await withPage(async (page) => {
+      // 29,97 i/s comme la caméra : un horodatage WebM (1 ms) ne tombe jamais exactement sur k / cadence, et
+      // `currentTime = k / cadence` afficherait l'image précédente une fois sur deux
+      const ntsc = path.join(app.media, 'ntsc.insv');
+      execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', clip, '-map', '0:v:0', '-map', '0:v:1', '-map', '0:a', '-r', '30000/1001',
+        '-c:v', 'libx264', '-crf', '14', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-f', 'mp4', ntsc]);
+      await openAndWait(page, ntsc);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 30, pitch: 10, roll: 0, fov: 90 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab();
+      });
+      const fps = await page.evaluate('window.__x3.S.fps');
+      assert.ok(Math.abs(fps - 30000 / 1001) < 1e-3, `cadence ${fps}`);
+      for (let k = 1; k <= 12; k++) {
+        await page.evaluate((k) => { const X = window.__x3; X.seek(k / X.S.fps); X.S.dirty = true; }, k);
+        await settle(page);
+        await sleep(300);
+        const t = await page.evaluate('window.__x3.S.t');
+        assert.ok(Math.abs(t - k / fps) < 1e-6, `image ${k} : l'instant courant est celui de l'image (${t} au lieu de ${k / fps})`);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.03, `image ${k} : l'aperçu montre une autre image que l'export (écart ${diff.toFixed(4)})`);
+      }
+    });
+  });
 });
