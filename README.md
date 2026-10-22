@@ -1,5 +1,7 @@
 # X3 Studio Local
 
+[![Tests](https://github.com/neomars/ubuntu_insta_360_x3/actions/workflows/ci.yml/badge.svg)](https://github.com/neomars/ubuntu_insta_360_x3/actions/workflows/ci.yml)
+
 Traitement **100 % local** des vidéos de l'**Insta360 X3** sur Ubuntu, dans l'esprit de l'application
 mobile Insta360 (import, recadrage 360° par keyframes, stabilisation, projections créatives, export).
 Aucune donnée ne quitte votre machine : pas de compte, pas de cloud, pas de télémétrie. Le serveur de

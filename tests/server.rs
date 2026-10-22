@@ -445,7 +445,9 @@ fn open_edit_and_export_flow() {
             Some(json!({"settings": {"width": 320, "height": 180, "crf": 30, "preset": "ultrafast"}})),
         )
         .json();
-    assert_eq!((j["kind"].as_str(), j["state"].as_str()), (Some("export"), Some("queued")));
+    // la tâche peut déjà être démarrée quand la réponse est écrite (aucune autre tâche lourde devant elle)
+    assert_eq!(j["kind"], "export");
+    assert!(matches!(j["state"].as_str(), Some("queued" | "running")), "{j}");
     assert!(j["title"].as_str().unwrap().starts_with("Export flat : "));
     let done = s.wait_jobs();
     let ex = done.iter().find(|x| x["id"] == j["id"]).unwrap();
