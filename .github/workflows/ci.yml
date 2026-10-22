@@ -9,6 +9,10 @@ on:
     branches: ["**"]
   pull_request:
 
+# Lecture seule : ces jobs n'ont rien à écrire dans le dépôt.
+permissions:
+  contents: read
+
 jobs:
   engine:
     strategy:
@@ -16,6 +20,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: ffmpeg (médias de test, référence v360)
@@ -35,6 +40,7 @@ jobs:
 
   ui:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: ffmpeg
@@ -60,6 +66,7 @@ jobs:
   package:
     # Construit sur la plus ancienne cible : glibc 2.35, le .deb s'installe sur 22.04 comme sur 24.04.
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Outils de contrôle
@@ -84,6 +91,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
