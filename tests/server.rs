@@ -309,7 +309,10 @@ fn file_listing() {
 #[test]
 fn request_validation() {
     let s = server();
-    let bad = |method: &str, path: &str, body: &[u8]| {
+    // Client jetable à chaque requête : le serveur ferme la connexion après un corps refusé (413), et une connexion
+    // réutilisée par le client partagé pourrait être déjà fermée (échec de la requête suivante, au hasard du timing).
+    let bad = |method: &str, path: &str, body: &[u8]| -> Option<(u16, String)> {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
         let b = ureq::http::Request::builder()
             .method(method)
             .uri(format!("{}{path}", s.base))
@@ -317,17 +320,20 @@ fn request_validation() {
             .header("Content-Type", "application/json")
             .body(body.to_vec())
             .unwrap();
-        let r = s.agent.run(b).unwrap();
+        // `None` : connexion coupée par le serveur pendant l'envoi (il refuse sans lire tout le corps)
+        let r = agent.run(b).ok()?;
         let st = r.status().as_u16();
-        (st, String::from_utf8_lossy(&r.into_body().read_to_vec().unwrap()).into_owned())
+        Some((st, String::from_utf8_lossy(&r.into_body().read_to_vec().unwrap_or_default()).into_owned()))
     };
-    let (st, body) = bad("POST", "/api/open", b"{pas du json");
+    let (st, body) = bad("POST", "/api/open", b"{pas du json").unwrap();
     assert_eq!(st, 400);
     assert!(body.contains("JSON invalide"), "{body}");
-    let (st, body) = bad("POST", "/api/open", b"[1,2]");
+    let (st, body) = bad("POST", "/api/open", b"[1,2]").unwrap();
     assert_eq!(st, 400);
     assert!(body.contains("Objet JSON"), "{body}");
-    assert_eq!(bad("POST", "/api/open", &vec![b'a'; 5 * 1024 * 1024]).0, 413, "corps trop gros");
+    // corps trop gros : 413, ou connexion coupée avant la fin de l'envoi (les deux sont un refus)
+    let too_big = bad("POST", "/api/open", &vec![b'a'; 5 * 1024 * 1024]);
+    assert!(too_big.as_ref().is_none_or(|(st, _)| *st == 413), "corps trop gros : {too_big:?}");
     // erreurs de projets et de tâches
     assert_eq!(s.status("POST", "/api/open", Some(json!({"path": "/nulle/part.insv"}))), 400);
     assert_eq!(s.status("POST", "/api/open", Some(json!({}))), 400);
