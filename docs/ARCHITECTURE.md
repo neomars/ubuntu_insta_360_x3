@@ -66,6 +66,10 @@ ffmpeg (décodeur)  ──I420 brut──▶  rendu (rayon)  ──I420 brut─�
 * Les processus sont lancés sans shell, leur stderr est lu en continu (sinon ils se bloquent), ils sont tués et
   attendus dans tous les cas de sortie (annulation, erreur, panique) : jamais d'orphelin. Une sortie
   partielle est supprimée.
+* Instant → image : l'export prend l'image dont l'horodatage est la plus proche de `t`. L'interface s'y place en
+  visant le **milieu** de l'intervalle d'affichage de cette image (`seek` dans `web/app.js`) : le navigateur affiche
+  la dernière image dont l'horodatage est ≤ `currentTime`, et un horodatage WebM (arrondi à 1 ms, décalé de +7 ms
+  par FFmpeg 4.4) ne tombe jamais exactement sur `k / cadence`. À l'arrêt, l'instant courant est `k / cadence`.
 * Les noms de sortie sont **réservés** (fichier créé en exclusivité) au lancement de l'export : deux exports en
   file ne visent jamais le même fichier.
 
