@@ -240,7 +240,7 @@ pub fn source_from_probe(
             size = (w, h);
             codec = codec_of(v);
             notes.push("Deux fichiers d'objectif appariés (_00_ / _10_).".into());
-        } else if h > 0 && w == 2 * h && w % 2 == 0 && is_insv {
+        } else if h > 0 && w == 2 * h && w.is_multiple_of(2) && is_insv {
             layout = Layout::SbsFisheye;
             lens_files = vec![me.clone(), me.clone()];
             lens_streams = vec![first_rank, first_rank];

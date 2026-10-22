@@ -81,6 +81,8 @@ pub struct StabOverride {
     pub strength: Option<f64>,
     pub heading_strength: Option<f64>,
     pub orientation: Option<Ypr>,
+    /// Début de la plage (s) : l'image de référence du mode « verrouillé ». `None` = début de la plage du projet.
+    pub start: Option<f64>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -302,7 +304,8 @@ impl Project {
         let orient = self.orientation();
         match orient {
             Some(o) if mode != StabMode::Off => {
-                let reference = (state.trim.start * self.src.fps).round_ties_even().max(0.0) as usize;
+                let start = over.start.unwrap_or(state.trim.start);
+                let reference = (start * self.src.fps).round_ties_even().max(0.0) as usize;
                 Some(stabilize::stabilization_matrices(
                     Some(&o),
                     mode,
@@ -597,6 +600,12 @@ mod tests {
         let want = o.matrices();
         assert!((lock[3] - want[3].transpose() * want[reference]).abs().max() < 1e-12);
         assert!((lock[reference] - Mat3::identity()).abs().max() < 1e-12);
+        // la surcharge `start` (ligne de commande) remplace la plage du projet : référence = image 20 (1 s à 20 i/s)
+        let lock_at_1s = p
+            .stab_matrices(&StabOverride { mode: Some(StabMode::Lock), start: Some(1.0), ..Default::default() })
+            .unwrap();
+        assert!((lock_at_1s[3] - want[3].transpose() * want[20]).abs().max() < 1e-12);
+        assert!((lock_at_1s[20] - Mat3::identity()).abs().max() < 1e-12);
         // mode du projet (smooth) et surcharge « off »
         p.update_state(&json!({"stabilization": {"mode": "smooth", "strength": 0.5}})).unwrap();
         assert_eq!(p.stab_matrices(&StabOverride::default()).unwrap().len(), n);

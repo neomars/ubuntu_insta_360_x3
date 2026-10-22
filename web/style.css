@@ -139,3 +139,4 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-bottom-width
 
 .vhid { position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
 [hidden] { display: none !important; }
+.field > .btn.small { margin-top: 4px; }

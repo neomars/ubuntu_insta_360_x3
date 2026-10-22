@@ -185,18 +185,18 @@ impl LensRenderer {
         proj: Projection,
         grid_div: u32,
     ) -> Result<Self> {
-        if out_w == 0 || out_h == 0 || out_w % 2 != 0 || out_h % 2 != 0 {
+        if out_w == 0 || out_h == 0 || !out_w.is_multiple_of(2) || !out_h.is_multiple_of(2) {
             return Err(export_err("La taille de sortie doit être paire."));
         }
         let frame_in = match src {
             SourceKind::Dual { lens } => {
-                if lens == 0 || lens % 2 != 0 {
+                if lens == 0 || !lens.is_multiple_of(2) {
                     return Err(export_err("La taille d'un objectif doit être paire."));
                 }
                 (2 * lens as usize) * lens as usize * 3 / 2
             }
             SourceKind::Equirect { w, h } => {
-                if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+                if w == 0 || h == 0 || !w.is_multiple_of(2) || !h.is_multiple_of(2) {
                     return Err(export_err("La taille de l'image équirectangulaire doit être paire."));
                 }
                 w as usize * h as usize * 3 / 2

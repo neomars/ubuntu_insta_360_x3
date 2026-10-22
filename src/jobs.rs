@@ -5,7 +5,7 @@ use crate::error::{is_cancelled, is_user_error, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -238,6 +238,8 @@ fn worker(shared: &(Mutex<PoolState>, Condvar)) {
 struct Inner {
     jobs: Mutex<HashMap<String, Arc<Job>>>,
     next_id: AtomicU64,
+    /// Tâches soumises et pas encore entièrement terminées (`on_done` compris).
+    busy: Arc<AtomicUsize>,
     heavy: Pool,
     light: Pool,
 }
@@ -263,6 +265,7 @@ impl JobManager {
             inner: Arc::new(Inner {
                 jobs: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
+                busy: Arc::new(AtomicUsize::new(0)),
                 heavy: Pool::new("x3-heavy", 1),
                 light: Pool::new("x3-light", 2),
             }),
@@ -302,7 +305,12 @@ impl JobManager {
             }
         }
         let j = job.clone();
-        let task: Task = Box::new(move || run_job(&j, f, on_done));
+        let busy = self.inner.busy.clone();
+        busy.fetch_add(1, Ordering::SeqCst);
+        let task: Task = Box::new(move || {
+            run_job(&j, f, on_done);
+            busy.fetch_sub(1, Ordering::SeqCst);
+        });
         if heavy { &self.inner.heavy } else { &self.inner.light }.submit(task);
         job
     }
@@ -327,6 +335,23 @@ impl JobManager {
             }
         }
         job.finished_cv.notify_all();
+        true
+    }
+
+    /// Arrêt du programme : annule toutes les tâches non terminées et attend (au plus `timeout`) qu'elles aient
+    /// réellement fini (processus ffmpeg tués, sorties partielles supprimées). Vrai si tout est arrêté.
+    pub fn shutdown(&self, timeout: Duration) -> bool {
+        let ids: Vec<String> = lock(&self.inner.jobs).keys().cloned().collect();
+        for id in &ids {
+            self.cancel(id);
+        }
+        let deadline = Instant::now() + timeout;
+        while self.inner.busy.load(Ordering::SeqCst) > 0 {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         true
     }
 
@@ -591,6 +616,54 @@ mod tests {
         assert_eq!(lock(&slow.inner).progress, 1.0);
         slow.set_progress(f64::NAN);
         assert_eq!(lock(&slow.inner).progress, 0.0);
+    }
+
+    #[test]
+    fn shutdown_cancels_everything_and_waits_for_the_cleanup() {
+        let m = JobManager::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let flag = cleaned.clone();
+        let running = m.submit(
+            "export",
+            "long",
+            "p",
+            true,
+            Box::new(move |job| {
+                started_tx.send(()).unwrap();
+                while !job.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(150)); // nettoyage lent (tuer ffmpeg, supprimer la sortie)
+                Err(Cancelled.into())
+            }),
+            Some(Box::new(move |_| {
+                std::thread::sleep(Duration::from_millis(50));
+                flag.store(true, Ordering::SeqCst);
+            })),
+        );
+        let queued = m.submit("export", "attend", "p", true, ok("jamais"), None);
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(m.shutdown(Duration::from_secs(10)));
+        assert!(cleaned.load(Ordering::SeqCst), "on_done a fini avant le retour de shutdown");
+        assert_eq!((running.state(), queued.state()), (JobState::Cancelled, JobState::Cancelled));
+        // rien à faire : retour immédiat
+        let t0 = Instant::now();
+        assert!(m.shutdown(Duration::from_secs(10)) && t0.elapsed() < Duration::from_secs(1));
+        // une tâche qui ignore l'annulation : le délai est respecté
+        let stubborn = JobManager::new();
+        let (tx, rx) = mpsc::channel::<()>();
+        stubborn.submit(
+            "export",
+            "têtue",
+            "p",
+            true,
+            Box::new(move |_| Ok(rx.recv_timeout(Duration::from_secs(3)).map(|_| String::new()).unwrap_or_default())),
+            None,
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!stubborn.shutdown(Duration::from_millis(200)));
+        drop(tx);
     }
 
     #[test]

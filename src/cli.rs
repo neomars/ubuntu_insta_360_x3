@@ -279,6 +279,7 @@ fn stab_matrices(p: &Project, args: &ExportArgs) -> Result<Option<Vec<Mat3>>> {
         strength: Some(args.strength),
         heading_strength: Some(args.heading),
         orientation: Some(args.orient.unwrap_or_default()),
+        start: Some(args.start),
     }))
 }
 
@@ -296,15 +297,24 @@ fn settings(args: &ExportArgs) -> ExportSettings {
     }
 }
 
-fn view_settings(base: ExportSettings, v: &ViewArgs) -> ExportSettings {
+fn view_settings(base: ExportSettings, v: &ViewArgs) -> Result<ExportSettings> {
+    check_finite(&[("--yaw", v.yaw), ("--pitch", v.pitch), ("--roll", v.roll), ("--fov", v.fov)])?;
     let fov = if v.fov != 0.0 { v.fov } else { default_fov(&v.projection) };
-    ExportSettings {
+    Ok(ExportSettings {
         mode: "reframe".into(),
         projection: v.projection.clone(),
         width: v.size.0,
         height: v.size.1,
         view: json!({ "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": fov }),
         ..base
+    })
+}
+
+/// Refuse `nan` / `inf` (acceptés par l'analyse des nombres) : « Erreur : valeur invalide pour --yaw ».
+fn check_finite(values: &[(&str, f64)]) -> Result<()> {
+    match values.iter().find(|(_, v)| !v.is_finite()) {
+        Some((name, v)) => Err(export_err(format!("Valeur invalide pour {name} : {v}"))),
+        None => Ok(()),
     }
 }
 
@@ -316,6 +326,15 @@ fn run_export(
     snapshot_t: Option<f64>,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    check_finite(&[
+        ("--start", args.start),
+        ("--end", args.end),
+        ("--speed", args.speed),
+        ("--fps", args.fps),
+        ("--strength", args.strength),
+        ("--heading", args.heading),
+        ("--t", snapshot_t.unwrap_or(0.0)),
+    ])?;
     let stab = stab_matrices(p, args)?;
     let ext = if snapshot_t.is_some() { "jpg" } else { "mp4" };
     let out = args.output.clone().unwrap_or_else(|| app.output_path(p, s, args.output_dir.as_deref(), ext));
@@ -399,7 +418,7 @@ fn cmd_reframe(a: ReframeArgs, cancel: &AtomicBool) -> Result<()> {
         None => vec![],
     };
     let (app, p) = prepare(&a.export, a.export.stabilize != "off", cancel)?;
-    let s = ExportSettings { keyframes, ..view_settings(settings(&a.export), &a.view) };
+    let s = ExportSettings { keyframes, ..view_settings(settings(&a.export), &a.view)? };
     run_export(&app, &p, &s, &a.export, None, cancel)
 }
 
@@ -411,7 +430,7 @@ fn cmd_equirect(a: EquirectArgs, cancel: &AtomicBool) -> Result<()> {
 
 fn cmd_snapshot(a: SnapshotArgs, cancel: &AtomicBool) -> Result<()> {
     let (app, p) = prepare(&a.export, a.export.stabilize != "off", cancel)?;
-    let s = view_settings(settings(&a.export), &a.view);
+    let s = view_settings(settings(&a.export), &a.view)?;
     run_export(&app, &p, &s, &a.export, Some(a.t), cancel)
 }
 
@@ -555,7 +574,7 @@ mod tests {
             ("horizon", 18, true, true)
         );
         assert_eq!(a.export.orient, Some(Ypr { yaw: 0.0, pitch: 0.0, roll: -3.5 }));
-        let s = view_settings(settings(&a.export), &a.view);
+        let s = view_settings(settings(&a.export), &a.view).unwrap();
         assert_eq!(
             (s.mode.as_str(), s.projection.as_str(), s.width, s.height, s.audio, s.crf),
             ("reframe", "planet", 1280, 720, false, 18)
@@ -568,7 +587,7 @@ mod tests {
             panic!()
         };
         assert_eq!(b.t, 2.5);
-        assert_eq!(view_settings(settings(&b.export), &b.view).view["fov"].as_f64(), Some(180.0));
+        assert_eq!(view_settings(settings(&b.export), &b.view).unwrap().view["fov"].as_f64(), Some(180.0));
         let d = settings(&b.export);
         assert_eq!(
             (d.start, d.end, d.speed, d.fps, d.codec.as_str(), d.preset.as_str(), d.audio),

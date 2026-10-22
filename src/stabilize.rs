@@ -109,7 +109,7 @@ impl Orientation {
         let key_len = u32::from_le_bytes(r.array().ok_or_else(bad)?) as usize;
         let key = String::from_utf8(r.take(key_len).ok_or_else(bad)?.to_vec()).map_err(|_| bad())?;
         // taille attendue : n * (4 * 8 + 4) octets ; vérifiée avant toute allocation
-        if r.remaining() / 36 != n || r.remaining() % 36 != 0 {
+        if r.remaining() / 36 != n || !r.remaining().is_multiple_of(36) {
             return Err(bad());
         }
         let mut quats = Vec::with_capacity(n);
@@ -124,7 +124,8 @@ impl Orientation {
         for _ in 0..n {
             inliers.push(u32::from_le_bytes(r.array().ok_or_else(bad)?));
         }
-        if !fps.is_finite() || quats.iter().flatten().any(|v| !v.is_finite()) {
+        let unit = |q: &Quat| (q.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() < 0.1;
+        if !(fps.is_finite() && fps > 0.0) || !quats.iter().all(unit) {
             return Err(bad());
         }
         Ok(Orientation { quats, fps, inliers, key })
@@ -726,7 +727,7 @@ pub fn analyze_frames(
             }
             quats.push(quat);
             inliers.push(n as u32);
-            if quats.len() % 256 == 0 {
+            if quats.len().is_multiple_of(256) {
                 q = matrix_from_quat(&quat); // évite la dérive d'orthogonalité
             }
         }
@@ -1121,6 +1122,18 @@ mod tests {
         std::fs::write(&p, &huge).unwrap();
         assert!(Orientation::load(&p).is_err());
         assert!(Orientation::load(&dir.path().join("absent.bin")).is_err());
+        // contenu cohérent en apparence mais inutilisable : quaternion nul, cadence nulle ou négative, NaN
+        let bad_values = |edit: &dyn Fn(&mut Orientation)| {
+            let mut o2 = o.clone();
+            edit(&mut o2);
+            o2.save(&p).unwrap();
+            Orientation::load(&p).is_err()
+        };
+        assert!(bad_values(&|o| o.quats[1] = [0.0; 4]));
+        assert!(bad_values(&|o| o.quats[2] = [f64::NAN, 0.0, 0.0, 1.0]));
+        assert!(bad_values(&|o| o.fps = 0.0));
+        assert!(bad_values(&|o| o.fps = -30.0));
+        assert!(bad_values(&|o| o.fps = f64::INFINITY));
     }
 
     #[test]

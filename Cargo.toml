@@ -2,7 +2,7 @@
 name = "x3studio"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.89"
 description = "Traitement 100 % local des vidéos Insta360 X3 (360°, stabilisation, export)"
 license = "MIT"
 repository = "https://github.com/neomars/ubuntu_insta_360_x3"

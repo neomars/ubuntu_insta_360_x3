@@ -136,6 +136,12 @@ fn errors_are_friendly_and_exit_codes_are_right() {
     assert_eq!(r.status.code(), Some(1));
     assert!(text(&r.stderr).contains("paires"), "{}", text(&r.stderr));
     assert!(!e.out("x.mp4").exists());
+    // `nan` / `inf` sont des nombres pour l'analyseur d'options : refusés avec un message clair
+    for opt in [["--yaw", "nan"], ["--fov", "inf"], ["--start", "nan"], ["--speed", "inf"]] {
+        let r = e.x3(&["reframe", p(&c.path), "--dry-run", opt[0], opt[1]]);
+        assert_eq!(r.status.code(), Some(1), "{opt:?}");
+        assert!(text(&r.stderr).contains("Valeur invalide"), "{opt:?} : {}", text(&r.stderr));
+    }
     // fichier qui n'est pas une vidéo
     let junk = e.out("faux.insv");
     std::fs::write(&junk, b"pas une video").unwrap();
@@ -399,4 +405,101 @@ fn ctrl_c_cancels_cleanly_and_leaves_no_ffmpeg() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     let left: Vec<String> = processes_mentioning(&needle).into_iter().filter(|c| c.contains("ffmpeg")).collect();
     assert!(left.is_empty(), "ffmpeg orphelin : {left:?}");
+}
+
+#[test]
+fn the_gui_server_stops_cleanly_on_sigint_during_an_export() {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+    let e = Env::new();
+    let c = static_clip();
+    let needle = format!("arret-{}", std::process::id());
+    let out_dir = e.out(&needle);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_x3studio"))
+        .args(["gui", "--no-browser"])
+        .env("X3STUDIO_HOME", e.dir.path().join("home"))
+        .env("X3STUDIO_OUTPUT", e.dir.path().join("sorties"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // adresse annoncée au démarrage : http://127.0.0.1:PORT/?key=CLE
+    let mut lines = BufReader::new(child.stdout.take().unwrap());
+    let mut url = String::new();
+    let mut line = String::new();
+    while url.is_empty() {
+        line.clear();
+        assert!(lines.read_line(&mut line).unwrap() > 0, "le serveur s'est arrêté avant d'annoncer son adresse");
+        if let Some(i) = line.find("http://127.0.0.1:") {
+            url = line[i..].trim().to_string();
+        }
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+    let html = agent.get(&url).call().unwrap().into_body().read_to_string().unwrap();
+    let token = html
+        .split("name=\"x3-token\" content=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("jeton dans la page")
+        .to_string();
+    let base = url.split("/?").next().unwrap().to_string();
+    let get = |path: &str| -> serde_json::Value {
+        agent
+            .get(&format!("{base}{path}"))
+            .header("X-X3-Token", &token)
+            .call()
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap()
+    };
+    let post = |path: &str, body: serde_json::Value| -> serde_json::Value {
+        agent
+            .post(&format!("{base}{path}"))
+            .header("X-X3-Token", &token)
+            .send_json(&body)
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap()
+    };
+    let project = post("/api/open", serde_json::json!({"path": c.path}));
+    let pid = project["id"].as_str().unwrap().to_string();
+    let t0 = Instant::now();
+    while get("/api/jobs").as_array().unwrap().iter().any(|j| j["state"] != "done" && j["state"] != "error") {
+        assert!(t0.elapsed() < Duration::from_secs(120), "aperçu interminable");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let job = post(
+        &format!("/api/project/{pid}/export"),
+        serde_json::json!({"settings": {"width": 1920, "height": 1080, "preset": "veryslow", "crf": 10}, "directory": out_dir}),
+    );
+    let id = job["id"].as_str().unwrap().to_string();
+    // l'export tourne : le processus d'encodage existe
+    let t0 = Instant::now();
+    while processes_mentioning(&needle).iter().all(|c| !c.contains("rawvideo")) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "l'export ne démarre pas : {}",
+            get(&format!("/api/jobs/{id}"))
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap().success());
+    let t0 = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "le serveur ne s'arrête pas");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "arrêt propre : {status:?}");
+    // aucun ffmpeg orphelin, aucune sortie partielle ni fichier réservé
+    let left: Vec<String> = processes_mentioning(&needle).into_iter().filter(|c| c.contains("ffmpeg")).collect();
+    assert!(left.is_empty(), "ffmpeg orphelin : {left:?}");
+    let files: Vec<_> =
+        std::fs::read_dir(&out_dir).map(|d| d.flatten().map(|f| f.path()).collect()).unwrap_or_default();
+    assert!(files.is_empty(), "sortie partielle : {files:?}");
 }

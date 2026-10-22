@@ -88,6 +88,16 @@ export async function openAndWait(page, file) {
   await sleep(600);
 }
 
+/** Attend que la vidéo ait fini de se positionner (pas de saut en cours, image décodée) puis que l'aperçu soit redessiné. */
+export async function settle(page, timeout = 20000) {
+  await page.waitForFunction(() => {
+    const v = document.getElementById('video');
+    return !v.seeking && v.readyState >= 2;
+  }, null, { timeout });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await sleep(250);
+}
+
 /** Écart de pixels (0..1) entre le canvas WebGL et l'image de la vue calculée par le serveur (`/frame`), réduits 3x par moyenne de blocs. */
 export function previewVsExport(page) {
   return page.evaluate(async () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, sleep, startApp } from './helpers.mjs';
+import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, startApp } from './helpers.mjs';
 
 describe('interface X3 Studio Local', () => {
   let app, browser, clip;
@@ -57,22 +57,28 @@ describe('interface X3 Studio Local', () => {
       const file = fresh('parite');
       await openAndWait(page, file);
       const cases = [
-        ['flat', { yaw: 30, pitch: 10, roll: 5, fov: 90 }, 'lock', 1.0],
-        ['flat', { yaw: -120, pitch: -20, roll: 0, fov: 110 }, 'off', 0.4],
-        ['fisheye', { yaw: 10, pitch: 0, roll: 0, fov: 200 }, 'smooth', 0.5],
-        ['planet', { yaw: 0, pitch: -90, roll: 0, fov: 250 }, 'off', 1.5],
+        ['flat', { yaw: 30, pitch: 10, roll: 5, fov: 90 }, 'lock', 1.0, {}],
+        ['flat', { yaw: -120, pitch: -20, roll: 0, fov: 110 }, 'off', 0.4, {}],
+        ['fisheye', { yaw: 10, pitch: 0, roll: 0, fov: 200 }, 'smooth', 0.5, {}],
+        ['planet', { yaw: 0, pitch: -90, roll: 0, fov: 250 }, 'off', 1.5, {}],
+        // calibration des objectifs non triviale (rotations fines, quart de tour, champ, fondu), vue sur la couture
+        ['flat', { yaw: 90, pitch: 5, roll: 0, fov: 100 }, 'off', 0.8, { a_yaw: 3, a_pitch: -2, a_roll: 4, b_yaw: -5, b_pitch: 3, b_roll: 90, fov: 195, blend: 15 }],
+        ['fisheye', { yaw: 180, pitch: 0, roll: 0, fov: 200 }, 'off', 0.8, { swap_lenses: true, b_roll: -20 }],
       ];
-      for (const [proj, view, stab, t] of cases) {
-        await page.evaluate(async ([proj, view, stab, t]) => {
+      for (const [proj, view, stab, t, calib] of cases) {
+        await page.evaluate(async ([proj, view, stab, t, calib]) => {
           const X = window.__x3, S = X.S;
           S.st.projection = proj; S.st.view = view; S.st.keyframes = []; S.st.stabilization.mode = stab; S.override = null;
+          S.st.calibration = { ...S.st.calibration, ...calib };
+          X.viewer.setCalibration(S.st.calibration);
           X.viewer.setProjection(proj);
-          for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+          for (const k of ['projection', 'view', 'keyframes', 'stabilization', 'calibration']) S.pending.add(k);
           await X.flushSave(); await X.fetchStab(); X.seek(t); S.dirty = true;
-        }, [proj, view, stab, t]);
-        await sleep(1200);
+        }, [proj, view, stab, t, calib]);
+        await settle(page);
+        await sleep(500);
         const { diff, w, h } = await previewVsExport(page);
-        assert.ok(diff < 0.045, `${proj} ${JSON.stringify(view)} ${stab} : écart ${diff.toFixed(4)} entre l'aperçu et l'export (${w}x${h})`);
+        assert.ok(diff < 0.045, `${proj} ${JSON.stringify(view)} ${stab} ${JSON.stringify(calib)} : écart ${diff.toFixed(4)} entre l'aperçu et l'export (${w}x${h})`);
       }
     });
   });
@@ -88,7 +94,7 @@ describe('interface X3 Studio Local', () => {
       assert.ok(v0.yaw > 5 && v0.pitch > 1, `glisser vers la gauche et le bas : on regarde à droite et en haut (${JSON.stringify(v0)})`);
       await page.keyboard.press('k');
       await page.evaluate('window.__x3.seek(2.0)');
-      await sleep(400);
+      await settle(page);
       await page.mouse.move(cx, cy); await page.mouse.down(); await page.mouse.move(cx + 200, cy, { steps: 4 }); await page.mouse.up();
       await page.mouse.wheel(0, -400);
       await page.keyboard.press('k');
@@ -100,7 +106,7 @@ describe('interface X3 Studio Local', () => {
       assert.equal(await page.locator('#kf-list li').count(), 2);
       assert.equal(await page.locator('.kf').count(), 2);
       await page.evaluate('window.__x3.seek(1.0)');
-      await sleep(400);
+      await settle(page);
       assert.match(await page.innerText('#hud-readout'), /champ/);
       await page.evaluate('window.__x3.flushSave()');
       await sleep(600);
@@ -112,8 +118,8 @@ describe('interface X3 Studio Local', () => {
       const mid = await page.evaluate('window.__x3.S.st.keyframes.length && window.__x3.S.t');
       assert.ok(mid > 0.9 && mid < 1.1);
       // début / fin de l'export au clavier
-      await page.evaluate('window.__x3.seek(0.5)'); await sleep(600); await page.keyboard.press('i');
-      await page.evaluate('window.__x3.seek(1.5)'); await sleep(600); await page.keyboard.press('o');
+      await page.evaluate('window.__x3.seek(0.5)'); await settle(page); await page.keyboard.press('i');
+      await page.evaluate('window.__x3.seek(1.5)'); await settle(page); await page.keyboard.press('o');
       const trim = await page.evaluate('window.__x3.S.st.trim');
       assert.ok(Math.abs(trim.start - 0.5) < 0.05 && Math.abs(trim.end - 1.5) < 0.05, JSON.stringify(trim));
       // tout effacer : refusé dans la boîte de confirmation, puis accepté
@@ -175,6 +181,17 @@ describe('interface X3 Studio Local', () => {
       await sleep(700);
       assert.ok(meanAbsDiff(front, await canvasThumb(page)) > 10, 'avant et arrière échangés');
       await page.uncheck('#c-swap');
+      // quarts de tour de l'image d'un objectif (image couchée ou à l'envers) : 90, 180, -90 (270), 0
+      const turned = [];
+      for (let i = 0; i < 4; i++) {
+        await page.click('#c-b_turn');
+        turned.push(await page.evaluate('window.__x3.S.st.calibration.b_roll'));
+      }
+      assert.deepEqual(turned, [90, 180, -90, 0]);
+      await page.click('#c-a_turn');
+      assert.equal(await page.evaluate('window.__x3.S.st.calibration.a_roll'), 90);
+      await sleep(600);
+      assert.ok(meanAbsDiff(front, await canvasThumb(page)) > 10, "l'image de l'objectif avant a pivoté");
       await page.click('#btn-calib-reset');
       assert.equal(await page.evaluate('window.__x3.S.st.calibration.b_yaw'), 0);
     });

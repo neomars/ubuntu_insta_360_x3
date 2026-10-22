@@ -84,8 +84,9 @@ pub const MAX_FOV_FLAT: f64 = 170.0;
 pub const MAX_FOV_FISHEYE: f64 = 360.0;
 pub const MAX_FOV_PLANET: f64 = 350.0;
 
-/// Côté maximal d'une image de sortie (px) : au-delà, la mémoire d'une seule image dépasserait 400 Mo.
-pub const MAX_OUTPUT_SIDE: u32 = 16384;
+/// Côté maximal d'une image de sortie (px) : 8K (7680x4320, 8192x4096) tient ; au-delà, une seule image
+/// dépasserait 100 Mo et le pipeline en garde une demi-douzaine en mémoire.
+pub const MAX_OUTPUT_SIDE: u32 = 8192;
 const PROJECTIONS: [&str; 3] = ["flat", "fisheye", "planet"];
 const PRESETS: [&str; 10] =
     ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"];
@@ -119,7 +120,7 @@ impl ExportSettings {
             if !PROJECTIONS.contains(&self.projection.as_str()) {
                 return Err(export_err(format!("Projection inconnue : {}", self.projection)));
             }
-            if self.width % 2 != 0 || self.height % 2 != 0 {
+            if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
                 return Err(export_err("La largeur et la hauteur de sortie doivent être paires."));
             }
             if self.width == 0 || self.height == 0 || self.width > MAX_OUTPUT_SIDE || self.height > MAX_OUTPUT_SIDE {

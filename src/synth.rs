@@ -386,7 +386,7 @@ fn encode_args(opt: &SynthOptions, n: usize) -> Vec<String> {
 /// vraies (caméra -> monde, une par image).
 pub fn make_synthetic_insv(path: &Path, opt: &SynthOptions, texture: Option<&Texture>) -> Result<Vec<Mat3>> {
     let lens = opt.lens as usize;
-    if lens < 16 || lens % 2 != 0 {
+    if lens < 16 || !lens.is_multiple_of(2) {
         return Err(export_err("La taille d'un objectif doit être paire et d'au moins 16 px."));
     }
     let n = check_options(opt)?;
@@ -425,7 +425,7 @@ pub fn make_synthetic_equirect(
     opt: &SynthOptions,
     texture: Option<&Texture>,
 ) -> Result<Vec<Mat3>> {
-    if width < 32 || width % 4 != 0 {
+    if width < 32 || !width.is_multiple_of(4) {
         return Err(export_err("La largeur doit être un multiple de 4 d'au moins 32 px."));
     }
     let n = check_options(opt)?;

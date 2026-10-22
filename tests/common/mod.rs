@@ -137,7 +137,7 @@ pub fn read_frames(path: &Path, w: usize, h: usize, pix_fmt: &str, ss: Option<f6
     assert!(out.status.success(), "ffmpeg : {}", String::from_utf8_lossy(&out.stderr));
     let size = w * h * if pix_fmt == "rgb24" { 3 } else { 1 };
     assert!(
-        out.stdout.len() % size == 0,
+        out.stdout.len().is_multiple_of(size),
         "taille de flux inattendue : {} octets pour des images de {size}",
         out.stdout.len()
     );

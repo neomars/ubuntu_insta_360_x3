@@ -423,9 +423,10 @@ async fn api_reveal(body: Bytes) -> ApiResult<Json<Value>> {
     let data = parse_body(&body)?;
     let target = expand_home(data.get("path").and_then(Value::as_str).unwrap_or(""));
     let folder = if target.is_dir() { target } else { target.parent().map(Path::to_path_buf).unwrap_or_default() };
-    if !folder.is_dir() {
+    // chemin canonique : absolu, donc jamais pris pour une option par `xdg-open` (même un dossier nommé « -x »)
+    let Some(folder) = folder.canonicalize().ok().filter(|f| f.is_dir()) else {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Dossier introuvable"));
-    }
+    };
     match std::process::Command::new("xdg-open")
         .arg(&folder)
         .stdin(std::process::Stdio::null())
@@ -682,13 +683,11 @@ pub fn serve(app: Arc<App>, port: u16, open_browser: bool, path: Option<PathBuf>
             });
         }
         axum::serve(listener, router(state)).with_graceful_shutdown(shutdown_signal()).await?;
-        // Arrêt : on annule les tâches en cours pour ne laisser aucun ffmpeg orphelin.
-        for j in app.jobs.list() {
-            if let Some(id) = j.get("id").and_then(Value::as_str) {
-                app.jobs.cancel(id);
-            }
+        // Arrêt : on annule les tâches en cours et on attend qu'elles aient tué leurs ffmpeg et supprimé leurs
+        // sorties partielles (le processus ne doit laisser aucun orphelin).
+        if !app.jobs.shutdown(std::time::Duration::from_secs(15)) {
+            eprintln!("(des tâches n'ont pas pu être arrêtées à temps)");
         }
-        std::thread::sleep(std::time::Duration::from_millis(300));
         Ok(())
     })
 }

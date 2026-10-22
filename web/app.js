@@ -447,6 +447,16 @@ for (const k of ['fov', 'blend', 'a_yaw', 'a_pitch', 'a_roll', 'b_yaw', 'b_pitch
     viewer.setCalibration(S.st.calibration); S.dirty = true; scheduleSave('calibration'); markStale();
   });
 }
+// quarts de tour : si l'image d'un objectif est couchée ou à l'envers, le roulis fin (±10°) ne suffit pas
+for (const k of ['a', 'b']) {
+  $('#c-' + k + '_turn').addEventListener('click', () => {
+    const el = $('#c-' + k + '_roll');
+    let r = parseFloat(el.value) + 90;
+    if (r > 180) r -= 360;
+    el.value = r;
+    el.dispatchEvent(new Event('input'));
+  });
+}
 $('#c-swap').addEventListener('change', (e) => {
   S.st.calibration.swap_lenses = e.target.checked; viewer.setCalibration(S.st.calibration); S.dirty = true; scheduleSave('calibration'); markStale();
 });
