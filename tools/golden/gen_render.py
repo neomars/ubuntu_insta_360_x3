@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Valeurs de référence du moteur de rendu (Python/OpenCV) -> tests/golden/render.json.
 
-Usage : python3 tools/golden/gen_render.py   (depuis la racine du dépôt, avec x3studio/ Python présent)
+Usage :
+La version Python (référence, retirée du dépôt) se récupère dans l'historique :
+
+  git worktree add /tmp/x3-python-ref f956e3f
+  X3STUDIO_PY_REF=/tmp/x3-python-ref python3 tools/golden/gen_render.py > tests/golden/render.json
 """
 import json
 import sys
@@ -9,7 +13,9 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+import os
+
+ROOT = Path(os.environ.get('X3STUDIO_PY_REF', '.')).resolve()
 sys.path.insert(0, str(ROOT))
 from x3studio.calibration import Calibration  # noqa: E402
 from x3studio.geometry import ypr_to_matrix  # noqa: E402

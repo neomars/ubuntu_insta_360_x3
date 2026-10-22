@@ -2,16 +2,20 @@
 
     python3 tools/golden/gen_stabilize.py > tests/golden/stabilize.json
 
-La version Python (`x3studio/stabilize.py`) sert de spécification ; ce script sera supprimé avec elle.
+La version Python (`x3studio/*.py`, retirée du dépôt) sert de référence ; elle se récupère dans l'historique :
+
+    git worktree add /tmp/x3-python-ref f956e3f
+    X3STUDIO_PY_REF=/tmp/x3-python-ref python3 tools/golden/gen_stabilize.py > tests/golden/stabilize.json
 """
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, os.environ.get('X3STUDIO_PY_REF', '.'))
 from x3studio import stabilize as st  # noqa: E402
 from x3studio.geometry import quat_from_matrix, ypr_to_matrix  # noqa: E402
 

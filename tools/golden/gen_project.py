@@ -2,13 +2,17 @@
 
     python3 tools/golden/gen_project.py > tests/golden/project.json
 
-La version Python (`x3studio/project.py`) sert de spécification ; ce script sera supprimé avec elle.
+La version Python (`x3studio/*.py`, retirée du dépôt) sert de référence ; elle se récupère dans l'historique :
+
+    git worktree add /tmp/x3-python-ref f956e3f
+    X3STUDIO_PY_REF=/tmp/x3-python-ref python3 tools/golden/gen_project.py > tests/golden/project.json
 """
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, os.environ.get('X3STUDIO_PY_REF', '.'))
 from x3studio.pipeline import DEFAULT_FOV  # noqa: E402
 from x3studio.project import DEFAULT_STATE, _merge  # noqa: E402
 
