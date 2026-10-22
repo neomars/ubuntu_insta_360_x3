@@ -25,3 +25,8 @@ dist/
 *.ddeb
 *.buildinfo
 *.changes
+
+# Rust
+target/
+release/
+node_modules/

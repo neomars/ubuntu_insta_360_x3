@@ -1,0 +1,51 @@
+[package]
+name = "x3studio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Traitement 100 % local des vidéos Insta360 X3 : assemblage, recadrage 360°, stabilisation, export"
+license = "MIT"
+repository = "https://github.com/neomars/ubuntu_insta_360_x3"
+readme = "README.md"
+authors = ["martial limousin <martial.limousin@gmail.com>"]
+keywords = ["insta360", "360", "video", "stabilization", "ffmpeg"]
+categories = ["multimedia::video", "command-line-utilities"]
+
+[lib]
+name = "x3studio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "x3studio"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
+nalgebra = "0.35"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "fs", "io-util", "sync"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+ureq = { version = "3", features = ["json"] }
+
+# Même réglage que le moteur de virtual-story.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# Les boucles pixel par pixel sont ~30x plus lentes sans optimisation : les tests restent rapides.
+[profile.dev]
+opt-level = 2
+[profile.test]
+opt-level = 2
