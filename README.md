@@ -25,7 +25,7 @@ l'interface n'écoute que sur `127.0.0.1`.
 
 | Application Insta360 | X3 Studio Local |
 |---|---|
-| Import des `.insv` (deux objectifs) | Détection automatique : deux flux dans un fichier (X3, X2, ONE R), deux fichiers `_00_`/`_10_` (ONE X), fisheye côte à côte, ou vidéo 360° déjà assemblée |
+| Import des `.insv` (deux objectifs) | Détection automatique : deux flux dans un fichier (X3, X2, ONE R), deux fichiers `_00_`/`_10_` (ONE X), deux fisheye côte à côte dans un flux 2:1 (le `.lrv` basse résolution de l'X3, reconnu à son nom, à sa signature ou, pour une copie sans marque, à ses images), ou vidéo 360° déjà assemblée |
 | Assemblage 360° | Fisheye → équirectangulaire avec fondu de la couture ; calibration par objectif ajustable en direct |
 | Recadrage (« Reframe ») | Caméra virtuelle : cap, inclinaison, roulis, champ de vision, **keyframes** avec interpolation douce, déplaçables sur la timeline |
 | Perspectives | Plat (rectiligne), fisheye, **petite planète** |
@@ -92,7 +92,7 @@ Un export ne remplace jamais un fichier existant : `_2`, `_3`… sont ajoutés a
 
 ## Comment ça marche
 
-1. **Aperçu** : un proxy WebM léger (deux fisheye 960 px côte à côte) est écrit une fois. La visionneuse WebGL
+1. **Aperçu** : un proxy WebM léger (deux fisheye de 960 px au plus, côte à côte) est écrit une fois. La visionneuse WebGL
    fait l'assemblage et la projection *dans le navigateur*, en direct (calibration, stabilisation et vue se
    règlent sans réencoder).
 2. **Mouvement** : sur le proxy, les deux objectifs sont assemblés en une image équirectangulaire grise ; des
@@ -126,10 +126,12 @@ test. Pas d'accélération GPU pour l'instant.
 
 ## Limites connues — à lire
 
-* **Non validé sur un vrai fichier X3 :** je n'avais pas de fichier de la caméra. Tout a été vérifié sur des
-  vidéos synthétiques à géométrie connue. Les valeurs par défaut — champ de chaque objectif **200°**, flux 0 =
-  avant, flux 1 = arrière, image circulaire remplissant le carré — sont des hypothèses courantes. Si la couture
-  est visible ou l'orientation fausse, ouvrez l'onglet **Objectifs** : champ, rotations fines par objectif,
+* **Très peu de vrais fichiers X3 essayés :** un seul `.lrv` (1024×512, deux fisheye de 512 px) : avec les
+  réglages par défaut, il s'assemble en un panorama cohérent, et l'analyse, la stabilisation et l'export plat
+  fonctionnent. Les `.insv` pleine résolution n'ont pas pu être essayés ; le reste a été vérifié sur des vidéos
+  synthétiques à géométrie connue. Les valeurs par défaut — champ de chaque objectif **200°**, flux 0 = avant,
+  flux 1 = arrière, image circulaire remplissant le carré — sont des hypothèses courantes. Si la couture est
+  visible ou l'orientation fausse, ouvrez l'onglet **Objectifs** : champ, rotations fines par objectif,
   inversion avant/arrière et affichage de la zone de fondu se règlent en direct (typiquement 195–210°).
 * **Stabilisation par l'image, pas par le gyroscope :** robuste quand la scène a de la texture ; moins fiable de
   nuit, en ciel uni ou avec un sujet occupant tout le champ. L'onglet Stabilisation indique la fiabilité de
@@ -137,7 +139,10 @@ test. Pas d'accélération GPU pour l'instant.
   du `.insv` ne sont pas encore exploitées.
 * Vidéo uniquement (pas les `.insp`), 8 bits (les modes 10 bits sont convertis), pas de HDR, son stéréo, projection
   commune à tous les keyframes, un seul clip à la fois (pas de montage multi-clips).
-* L'aperçu requiert un navigateur lisant le VP9 (Firefox, Chrome, Chromium) et WebGL.
+* L'aperçu requiert un navigateur lisant le VP9 (Firefox, Chrome, Chromium) et WebGL. Si la lecture échoue, le
+  message dit pourquoi : navigateur sans VP9, serveur qui refuse le fichier (page ouverte avec une ancienne
+  adresse : utilisez celle que le terminal affiche) ou aperçu illisible (supprimez le dossier du projet
+  indiqué, `~/.cache/x3studio/projects/<id>`, pour le régénérer).
 
 ## Confidentialité et sécurité
 

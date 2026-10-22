@@ -217,7 +217,29 @@ function loadVideoIfReady() {
 video.addEventListener('loadeddata', () => { S.videoReady = true; S.dirty = true; seek(Math.max(0, S.st.trim.start)); });
 video.addEventListener('seeked', () => { S.dirty = true; });
 video.addEventListener('timeupdate', () => { if (video.paused) S.dirty = true; });
-video.addEventListener('error', () => { if (S.proj && S.proj.proxy.ready) toast('Lecture de l\'aperçu impossible dans ce navigateur (codec VP9 requis).', true); });
+// L'aperçu ne se lit pas : dire pourquoi (navigateur sans VP9, serveur qui refuse le fichier, fichier illisible)
+// plutôt que d'accuser le VP9 dans tous les cas.
+video.addEventListener('error', async () => {
+  if (!(S.proj && S.proj.proxy.ready)) return;
+  const err = video.error || {};
+  const detail = `code ${err.code ?? '?'}${err.message ? ' : ' + err.message : ''}`;
+  console.error('Aperçu illisible (' + detail + ') :', (video.currentSrc || '').replace(/token=[^&]+/, 'token=…'));
+  toast(await playbackErrorMessage(video.currentSrc, detail), true, 15000);
+});
+async function playbackErrorMessage(src, detail) {
+  if (!video.canPlayType('video/webm; codecs="vp9, opus"')) {
+    return 'Ce navigateur ne sait pas lire le VP9 (format de l\'aperçu) : ouvrez l\'interface dans Firefox ou Chromium.';
+  }
+  try {
+    const r = await fetch(src, { headers: { Range: 'bytes=0-1023' } });
+    if (r.status !== 200 && r.status !== 206) {
+      return `Le serveur a refusé l'aperçu (HTTP ${r.status}) : rechargez la page avec l'adresse affichée dans le terminal.`;
+    }
+  } catch (e) {
+    return 'Le serveur local ne répond plus : relancez x3studio puis rouvrez la vidéo.';
+  }
+  return `Le navigateur n'a pas pu décoder l'aperçu (${detail}). Supprimez le dossier du projet dans ~/.cache/x3studio/projects/${S.proj.id} pour le régénérer.`;
+}
 
 // ---------------------------------------------------------------- transport / timeline
 $('#btn-play').addEventListener('click', togglePlay);
@@ -430,7 +452,6 @@ function updateAnalysisStatus() {
   if (!S.proj) { box.textContent = ''; return; }
   const a = S.proj.analysis;
   box.className = 'status-box';
-  if (!a.available) { box.classList.add('err'); box.textContent = 'OpenCV n\'est pas installé : stabilisation indisponible (sudo apt install python3-opencv).'; $('#btn-analyze').disabled = true; return; }
   $('#btn-analyze').disabled = !S.proj.proxy.ready;
   if (!a.ready) { box.textContent = S.proj.proxy.ready ? 'Analyse du mouvement en attente ou en cours…' : 'L\'analyse démarrera après la préparation de l\'aperçu.'; return; }
   if (a.stale) { box.classList.add('warn'); box.innerHTML = ''; box.append('Les réglages d\'objectifs ont changé depuis l\'analyse : ', Object.assign(document.createElement('b'), { textContent: 'recalculez-la.' })); return; }
@@ -611,7 +632,6 @@ document.addEventListener('keydown', (e) => {
   try {
     S.info = await api('GET', '/api/info');
     $('#e-dir').value = S.info.output_dir;
-    if (!S.info.opencv) toast('OpenCV est absent : export plus lent et stabilisation indisponible (sudo apt install python3-opencv).', true, 9000);
   } catch (e) { toast(e.message, true); }
   updateExportSummary();
   frameLoop();

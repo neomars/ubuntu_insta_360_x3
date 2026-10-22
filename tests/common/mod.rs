@@ -382,6 +382,22 @@ pub fn expected_view(tex: &Texture, proj: &str, w: usize, h: usize, cam: &Mat3, 
 // ---------------------------------------------------------------------------
 // Dérivés de vidéos et inspection
 // ---------------------------------------------------------------------------
+/// Les deux objectifs dans un seul flux 2:1, comme dans les `.lrv` de l'X3.
+pub const HSTACK: [&str; 12] = [
+    "-filter_complex",
+    "[0:v:0][0:v:1]hstack=inputs=2[v]",
+    "-map",
+    "[v]",
+    "-c:v",
+    "libx264",
+    "-crf",
+    "14",
+    "-pix_fmt",
+    "yuv420p",
+    "-f",
+    "mp4",
+];
+
 /// Fichier dérivé d'un clip par ffmpeg (mis en cache) : `args` = tout ce qui suit `-i clip` jusqu'au fichier de
 /// sortie exclu, p. ex. `["-map", "0:v:1", "-c", "copy", "-f", "mp4"]`. Le fichier est dans un sous-dossier propre
 /// à `(clip, subdir)` : utile pour les noms imposés (`VID_..._00_001.insv`).

@@ -10,8 +10,9 @@ use std::process::Command;
 
 /// Les 32 derniers octets des fichiers Insta360 (fin des métadonnées embarquées).
 pub const INSTA360_TRAILER_MAGIC: &[u8; 32] = b"8db42d694ccc418790edff439fe026bf";
-/// Extensions (sans point, minuscules) proposées dans le sélecteur de fichiers.
-pub const VIDEO_EXTS: &[&str] = &["insv", "mp4", "mov", "mkv", "webm", "m4v"];
+/// Extensions (sans point, minuscules) proposées dans le sélecteur de fichiers (`.lrv` : version basse
+/// résolution que l'X3 enregistre à côté de chaque `.insv`).
+pub const VIDEO_EXTS: &[&str] = &["insv", "lrv", "mp4", "mov", "mkv", "webm", "m4v"];
 
 /// Organisation du fichier. Sérialisé en `two_streams` / `two_files` / `sbs_fisheye` / `equirect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +142,73 @@ pub fn has_insta360_trailer(path: &Path) -> bool {
     f.seek(SeekFrom::End(-32)).is_ok() && f.read_exact(&mut buf).is_ok() && &buf == INSTA360_TRAILER_MAGIC
 }
 
+/// Taille de l'image réduite examinée par [`is_dual_fisheye_frame`] (deux carrés de 128 px).
+const SNIFF_W: usize = 256;
+const SNIFF_H: usize = 128;
+
+/// Vrai si l'image 2:1 en niveaux de gris (`w` = 2 × `h`) montre deux objectifs fisheye côte à côte : deux
+/// cercles, donc hors des cercles (les quatre coins de chaque carré) un noir uniforme, alors que le centre ne
+/// l'est pas. Un panorama équirectangulaire remplit tout le cadre : ces coins sont de l'image.
+///
+/// Prudent : une scène nocturne (centre et coins sombres), un objectif couvert ou des cercles plus grands que le
+/// cadre (coins non noirs) donnent faux, comme un panorama.
+pub fn is_dual_fisheye_frame(gray: &[u8], w: usize, h: usize) -> bool {
+    const DARK: f64 = 28.0; // le noir d'une vidéo (16) plus un peu de bruit de compression
+    const FLAT: f64 = 10.0; // écart type maximal de ce noir : un ciel de nuit ou un sol sombre a du relief
+    const CONTRAST: f64 = 12.0;
+    if h < 16 || w != 2 * h || gray.len() != w * h {
+        return false;
+    }
+    let r = h as f64 / 2.0;
+    (0..2).all(|i| {
+        let (cx, cy) = ((i * h) as f64 + r, r);
+        let (mut inner, mut n_in) = (0.0, 0u32);
+        let (mut outer, mut outer_sq, mut n_out) = (0.0, 0.0, 0u32);
+        for y in 0..h {
+            for x in i * h..(i + 1) * h {
+                let d = ((x as f64 + 0.5 - cx).powi(2) + (y as f64 + 0.5 - cy).powi(2)).sqrt() / r;
+                let v = f64::from(gray[y * w + x]);
+                if d < 0.6 {
+                    inner += v;
+                    n_in += 1;
+                } else if d > 1.12 {
+                    outer += v;
+                    outer_sq += v * v;
+                    n_out += 1;
+                }
+            }
+        }
+        let (inner, n_out) = (inner / f64::from(n_in.max(1)), f64::from(n_out.max(1)));
+        let (outer_mean, outer_var) = (outer / n_out, outer_sq / n_out - (outer / n_out).powi(2));
+        outer_mean <= DARK && outer_var.max(0.0).sqrt() <= FLAT && inner >= outer_mean + CONTRAST
+    })
+}
+
+/// Image grise réduite (`SNIFF_W` × `SNIFF_H`) prise à l'instant `t` ; `None` si ffmpeg n'en tire rien.
+fn sample_gray_frame(path: &Path, t: f64) -> Option<Vec<u8>> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostdin", "-v", "error", "-ss", &format!("{t:.3}"), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", &format!("scale={SNIFF_W}:{SNIFF_H}:flags=area,format=gray")])
+        .args(["-f", "rawvideo", "-"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    (out.status.success() && out.stdout.len() == SNIFF_W * SNIFF_H).then_some(out.stdout)
+}
+
+/// Le fichier montre-t-il deux fisheye côte à côte ? Examine jusqu'à trois images (au quart, à la moitié, aux
+/// trois quarts de la durée) : une seule suffit.
+pub fn looks_like_dual_fisheye(path: &Path, duration: f64) -> bool {
+    let times: Vec<f64> =
+        if duration > 1.0 { [0.25, 0.5, 0.75].iter().map(|f| f * duration).collect() } else { vec![0.0] };
+    times
+        .into_iter()
+        .filter_map(|t| sample_gray_frame(path, t))
+        .any(|gray| is_dual_fisheye_frame(&gray, SNIFF_W, SNIFF_H))
+}
+
 /// `VID_20240101_120000_00_001.insv` ou `PRO_VID_...` (insensible à la casse) :
 /// retourne (préfixe sans le `_00_`, objectif `00`|`10`, numéro, extension avec point).
 fn parse_insv_name(name: &str) -> Option<(&str, &str, &str, &str)> {
@@ -188,11 +256,14 @@ fn path_string(p: &Path) -> String {
 
 /// Cœur pur et testable de la détection : `info` = sortie ffprobe du fichier. `load_pair` n'est appelé
 /// que si le fichier ressemble à un objectif seul avec un partenaire `_10_` : il retourne le chemin et la
-/// sortie ffprobe de ce partenaire (`None` = pas de partenaire). Erreurs : `MediaError`.
+/// sortie ffprobe de ce partenaire (`None` = pas de partenaire). `sniff(durée)` n'est appelé que pour un flux 2:1
+/// sans aucune marque Insta360 (`.insv`, `.lrv`, signature de fin de fichier) : vrai si les images montrent deux
+/// fisheye côte à côte. Erreurs : `MediaError`.
 pub fn source_from_probe(
     path: &Path,
     info: &Value,
     load_pair: &mut dyn FnMut() -> Result<Option<(PathBuf, Value)>>,
+    sniff: &mut dyn FnMut(f64) -> bool,
     has_trailer: bool,
     size_bytes: u64,
 ) -> Result<Source> {
@@ -208,8 +279,9 @@ pub fn source_from_probe(
         .or_else(|| parse_secs(v.get("duration")))
         .unwrap_or(0.0);
     let fps = fps_of(v);
-    let is_insv = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("insv"));
-    let camera = if is_insv { "Insta360" } else { "" }.to_string();
+    let has_ext = |ext: &str| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    let (is_insv, is_lrv) = (has_ext("insv"), has_ext("lrv"));
+    let camera = if is_insv || is_lrv || has_trailer { "Insta360" } else { "" }.to_string();
     let mut notes: Vec<String> = vec![];
     let codec_of = |s: &Value| s.get("codec_name").and_then(Value::as_str).unwrap_or("").to_string();
     let me = path_string(path);
@@ -240,26 +312,35 @@ pub fn source_from_probe(
             size = (w, h);
             codec = codec_of(v);
             notes.push("Deux fichiers d'objectif appariés (_00_ / _10_).".into());
-        } else if h > 0 && w == 2 * h && w.is_multiple_of(2) && is_insv {
-            layout = Layout::SbsFisheye;
-            lens_files = vec![me.clone(), me.clone()];
-            lens_streams = vec![first_rank, first_rank];
-            size = (h, h);
-            codec = codec_of(v);
-            notes.push("Deux fisheye côte à côte dans un seul flux.".into());
         } else if h > 0 && w == 2 * h {
-            layout = Layout::Equirect;
-            lens_files = vec![me.clone()];
-            lens_streams = vec![first_rank];
-            size = (w, h);
+            // 2:1 : deux fisheye côte à côte (l'X3 les enregistre ainsi dans ses `.insv` comme dans ses `.lrv`) ou
+            // vidéo déjà assemblée. Un fichier brut de la caméra (extension, signature de fin de fichier) est
+            // toujours en fisheye ; les autres sont départagés par leurs images.
+            let side_by_side = is_insv || is_lrv || has_trailer || sniff(duration);
             codec = codec_of(v);
-            notes.push("Vidéo déjà assemblée (équirectangulaire) : seul le recadrage est disponible.".into());
+            if side_by_side {
+                layout = Layout::SbsFisheye;
+                lens_files = vec![me.clone(), me.clone()];
+                lens_streams = vec![first_rank, first_rank];
+                size = (h, h);
+                notes.push("Deux fisheye côte à côte dans un seul flux.".into());
+            } else {
+                layout = Layout::Equirect;
+                lens_files = vec![me.clone()];
+                lens_streams = vec![first_rank];
+                size = (w, h);
+                notes.push("Vidéo déjà assemblée (équirectangulaire) : seul le recadrage est disponible.".into());
+            }
         } else {
             return Err(media_err(format!(
                 "Format non reconnu ({w}x{h}). Attendu : deux flux carrés (.insv), deux fisheye côte à côte, \
                  ou une vidéo équirectangulaire 2:1."
             )));
         }
+    }
+    if is_lrv {
+        notes
+            .push("Version basse résolution du clip (.lrv) : pour exporter en pleine qualité, ouvrez le .insv.".into());
     }
     Ok(Source {
         path: me.clone(),
@@ -307,7 +388,8 @@ pub fn probe_source(path: &Path) -> Result<Source> {
             None => Ok(None),
         }
     };
-    source_from_probe(&path, &info, &mut load_pair, has_trailer, size_bytes)
+    let mut sniff = |duration: f64| looks_like_dual_fisheye(&path, duration);
+    source_from_probe(&path, &info, &mut load_pair, &mut sniff, has_trailer, size_bytes)
 }
 
 #[cfg(test)]
@@ -322,6 +404,10 @@ mod tests {
 
     fn no_pair() -> Result<Option<(PathBuf, Value)>> {
         Ok(None)
+    }
+
+    fn no_sniff(_: f64) -> bool {
+        false
     }
 
     #[test]
@@ -353,7 +439,7 @@ mod tests {
         thumb["disposition"]["attached_pic"] = json!(1);
         let info = json!({"streams": [stream("video", 2880, 2880), thumb, stream("video", 2880, 2880), stream("audio", 0, 0)],
                           "format": {"duration": "12.5"}});
-        let s = source_from_probe(Path::new("/x/clip.insv"), &info, &mut no_pair, true, 123).unwrap();
+        let s = source_from_probe(Path::new("/x/clip.insv"), &info, &mut no_pair, &mut no_sniff, true, 123).unwrap();
         assert_eq!(s.layout, Layout::TwoStreams);
         assert_eq!(s.lens_streams, vec![0, 2], "la vignette jointe garde son rang mais n'est pas retenue");
         assert_eq!(s.lens_size, (2880, 2880));
@@ -372,11 +458,11 @@ mod tests {
     #[test]
     fn side_by_side_and_equirect() {
         let info = json!({"streams": [stream("video", 5760, 2880)], "format": {"duration": "3"}});
-        let s = source_from_probe(Path::new("/x/a.insv"), &info, &mut no_pair, false, 1).unwrap();
+        let s = source_from_probe(Path::new("/x/a.insv"), &info, &mut no_pair, &mut no_sniff, false, 1).unwrap();
         assert_eq!((s.layout, s.lens_size), (Layout::SbsFisheye, (2880, 2880)));
         assert_eq!(s.lens_streams, vec![0, 0]);
         assert_eq!(s.notes, vec!["Deux fisheye côte à côte dans un seul flux."]);
-        let s = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, false, 1).unwrap();
+        let s = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 1).unwrap();
         assert_eq!((s.layout, s.lens_size, s.camera.as_str()), (Layout::Equirect, (5760, 2880), ""));
         assert_eq!(s.lens_files, vec!["/x/a.mp4"]);
         assert!(!s.has_audio && s.audio_file.is_none());
@@ -388,7 +474,7 @@ mod tests {
         let pair_info = json!({"streams": [stream("audio", 0, 0), stream("video", 1920, 1920)]});
         let mut loader =
             || -> Result<Option<(PathBuf, Value)>> { Ok(Some((PathBuf::from("/x/B_10.insv"), pair_info.clone()))) };
-        let s = source_from_probe(Path::new("/x/A_00.insv"), &info, &mut loader, false, 1).unwrap();
+        let s = source_from_probe(Path::new("/x/A_00.insv"), &info, &mut loader, &mut no_sniff, false, 1).unwrap();
         assert_eq!(s.layout, Layout::TwoFiles);
         assert_eq!(s.lens_files, vec!["/x/A_00.insv", "/x/B_10.insv"]);
         assert_eq!(
@@ -400,18 +486,18 @@ mod tests {
         let empty = json!({"streams": [stream("audio", 0, 0)]});
         let mut loader =
             || -> Result<Option<(PathBuf, Value)>> { Ok(Some((PathBuf::from("/x/B_10.insv"), empty.clone()))) };
-        let e = source_from_probe(Path::new("/x/A_00.insv"), &info, &mut loader, false, 1).unwrap_err();
+        let e = source_from_probe(Path::new("/x/A_00.insv"), &info, &mut loader, &mut no_sniff, false, 1).unwrap_err();
         assert_eq!(e.to_string(), "Aucun flux vidéo dans /x/B_10.insv");
     }
 
     #[test]
     fn errors_have_the_python_messages() {
         let info = json!({"streams": [stream("audio", 0, 0)]});
-        let e = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, false, 1).unwrap_err();
+        let e = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 1).unwrap_err();
         assert_eq!(e.to_string(), "Aucun flux vidéo dans ce fichier.");
         assert!(crate::error::is_user_error(&e));
         let info = json!({"streams": [stream("video", 1920, 1080)]});
-        let e = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, false, 1).unwrap_err();
+        let e = source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 1).unwrap_err();
         assert_eq!(
             e.to_string(),
             "Format non reconnu (1920x1080). Attendu : deux flux carrés (.insv), deux fisheye côte à côte, \
@@ -419,7 +505,7 @@ mod tests {
         );
         // dimensions absentes : jamais de panique
         let info = json!({"streams": [{"codec_type": "video"}]});
-        assert!(source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, false, 1).is_err());
+        assert!(source_from_probe(Path::new("/x/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 1).is_err());
     }
 
     #[test]
@@ -431,9 +517,15 @@ mod tests {
         let mut v = stream("video", 100, 100);
         v["duration"] = json!("4.0");
         let info = json!({"streams": [v.clone(), v.clone()], "format": {"duration": "N/A"}});
-        assert_eq!(source_from_probe(Path::new("/a.mp4"), &info, &mut no_pair, false, 0).unwrap().duration, 4.0);
+        assert_eq!(
+            source_from_probe(Path::new("/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 0).unwrap().duration,
+            4.0
+        );
         let info = json!({"streams": [stream("video", 100, 100), stream("video", 100, 100)]});
-        assert_eq!(source_from_probe(Path::new("/a.mp4"), &info, &mut no_pair, false, 0).unwrap().duration, 0.0);
+        assert_eq!(
+            source_from_probe(Path::new("/a.mp4"), &info, &mut no_pair, &mut no_sniff, false, 0).unwrap().duration,
+            0.0
+        );
     }
 
     #[test]
@@ -459,5 +551,77 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         assert_eq!(find_lens_pair(&a), Some(b.clone()));
         assert!(find_lens_pair(&b).is_none(), "seul le fichier _00_ cherche son partenaire");
+    }
+
+    /// Image 256×128 : deux disques (rayon `radius` × 64 px) plus clairs au centre (`inner`) qu'au bord, `outside`
+    /// ailleurs ; `covered` éteint l'objectif de gauche.
+    fn two_discs(inner: u8, outside: u8, radius: f64, covered: bool) -> Vec<u8> {
+        let mut img = vec![outside; 256 * 128];
+        for y in 0..128 {
+            for x in 0..256 {
+                let (cx, cy) = (if x < 128 { 64.0 } else { 192.0 }, 64.0);
+                let d = ((x as f64 + 0.5 - cx).powi(2) + (y as f64 + 0.5 - cy).powi(2)).sqrt();
+                if d < 64.0 * radius && !(covered && x < 128) {
+                    img[y * 256 + x] = (inner as f64 * (1.0 - 0.4 * d / 64.0)) as u8;
+                    // vignetage
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn two_black_cornered_circles_are_dual_fisheye_and_nothing_else_is() {
+        assert!(is_dual_fisheye_frame(&two_discs(120, 16, 0.98, false), 256, 128));
+        // fond noir un peu plus haut (compression), cercles un peu plus petits que le carré
+        assert!(is_dual_fisheye_frame(&two_discs(90, 22, 0.9, false), 256, 128));
+        // un panorama : de l'image sur tout le cadre
+        let pano: Vec<u8> = (0..256 * 128).map(|i| (90 + (i * 37 % 97)) as u8).collect();
+        assert!(!is_dual_fisheye_frame(&pano, 256, 128));
+        // un panorama de nuit dont le ciel et le sol sont presque noirs mais granuleux : pas un noir uniforme
+        let mut night = two_discs(120, 16, 0.98, false);
+        for (i, v) in night.iter_mut().enumerate() {
+            if *v == 16 {
+                *v = if i % 2 == 0 { 0 } else { 40 };
+            }
+        }
+        assert!(!is_dual_fisheye_frame(&night, 256, 128));
+        // image noire, scène nocturne (disques à peine plus clairs que le fond), un objectif couvert, cercles plus
+        // grands que le cadre (coins non noirs), dimensions inattendues
+        assert!(!is_dual_fisheye_frame(&vec![16; 256 * 128], 256, 128));
+        assert!(!is_dual_fisheye_frame(&two_discs(24, 16, 0.98, false), 256, 128));
+        assert!(!is_dual_fisheye_frame(&two_discs(120, 16, 0.98, true), 256, 128));
+        assert!(!is_dual_fisheye_frame(&two_discs(120, 40, 1.6, false), 256, 128));
+        assert!(!is_dual_fisheye_frame(&pano, 128, 256));
+        assert!(!is_dual_fisheye_frame(&pano[..100], 256, 128));
+    }
+
+    #[test]
+    fn camera_files_are_fisheye_and_other_two_to_one_files_are_told_apart_by_their_frames() {
+        let info =
+            json!({"streams": [stream("video", 1024, 512), stream("audio", 0, 0)], "format": {"duration": "10"}});
+        let probe = |name: &str, trailer: bool, fisheye_frames: bool| {
+            let mut seen = None;
+            let mut sniff = |d: f64| {
+                seen = Some(d);
+                fisheye_frames
+            };
+            let s = source_from_probe(Path::new(name), &info, &mut no_pair, &mut sniff, trailer, 1).unwrap();
+            (s, seen)
+        };
+        // le .lrv de l'X3 : deux fisheye de 512 px côte à côte ; la caméra le marque, les images ne sont pas examinées
+        let (s, seen) = probe("/x/LRV_20261021_004354_11_001.lrv", true, false);
+        assert_eq!((s.layout, s.lens_size, s.camera.as_str()), (Layout::SbsFisheye, (512, 512), "Insta360"));
+        assert_eq!(seen, None);
+        assert!(s.notes.iter().any(|n| n.contains(".lrv")), "{:?}", s.notes);
+        for (name, trailer) in [("/x/a.insv", false), ("/x/a.LRV", false), ("/x/copie.mp4", true)] {
+            let (s, seen) = probe(name, trailer, false);
+            assert_eq!((s.layout, seen), (Layout::SbsFisheye, None), "{name}");
+        }
+        // sans marque Insta360 : les images décident (durée transmise)
+        let (s, seen) = probe("/x/copie.mp4", false, true);
+        assert_eq!((s.layout, s.lens_size, s.camera.as_str(), seen), (Layout::SbsFisheye, (512, 512), "", Some(10.0)));
+        let (s, seen) = probe("/x/pano.mp4", false, false);
+        assert_eq!((s.layout, s.lens_size, seen), (Layout::Equirect, (1024, 512), Some(10.0)));
     }
 }

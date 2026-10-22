@@ -363,7 +363,7 @@ fn request_validation() {
     assert_eq!(s.get("/api/jobs").json(), json!([]));
     let info = s.get("/api/info").json();
     assert_eq!(info["output_dir"], s.out.to_str().unwrap());
-    for k in ["version", "ffmpeg", "opencv", "home", "encoders", "cpus"] {
+    for k in ["version", "ffmpeg", "home", "encoders", "cpus"] {
         assert!(info.get(k).is_some(), "{k}");
     }
     assert_eq!(info["version"], x3studio::VERSION);

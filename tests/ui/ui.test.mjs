@@ -1,5 +1,6 @@
 // Interface web dans un vrai navigateur (Chromium sans écran, WebGL logiciel) pilotant le vrai serveur x3studio.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -254,6 +255,63 @@ describe('interface X3 Studio Local', () => {
       page.errors.length = 0;
       await openAndWait(page, fresh('apres-erreur'));
       assert.ok((await canvasStats(page)).std > 20);
+    });
+  });
+
+  it("ouvre un .lrv de la caméra (deux fisheye côte à côte, 2:1) comme un fichier à deux objectifs", async () => {
+    await withPage(async (page) => {
+      // le .lrv de l'X3 range les deux objectifs dans un seul flux 2:1 ; l'interface doit le proposer et l'assembler
+      const lrv = path.join(app.media, 'LRV_20261021_004354_11_001.lrv');
+      execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', clip, '-filter_complex', '[0:v:0][0:v:1]hstack=inputs=2[v]', '-map', '[v]',
+        '-c:v', 'libx264', '-crf', '16', '-pix_fmt', 'yuv420p', '-f', 'mp4', lrv]);
+      await openAndWait(page, lrv);
+      assert.match(await page.innerText('#file-info'), /^LRV_20261021_004354_11_001\.lrv — 2 × 480×480/, 'deux objectifs, pas un panorama');
+      const stats = await canvasStats(page);
+      assert.ok(stats.std > 20, `la scène assemblée doit apparaître (écart type ${stats.std.toFixed(1)})`);
+      // les réglages d'objectifs n'ont de sens que pour des fisheye : ils sont proposés
+      await page.click('.tab[data-tab=lens]');
+      assert.ok(await page.isVisible('#c-fov'), 'champ des objectifs réglable');
+    });
+  });
+
+  it("dit pourquoi l'aperçu ne se lit pas : serveur qui refuse, navigateur sans VP9, fichier illisible", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('lecture'));
+      const id = await page.evaluate(() => window.__x3.S.proj.id);
+      const clearToast = () => page.evaluate(() => { document.getElementById('toast').hidden = true; });
+      const playFrom = (url) => page.evaluate((u) => { const v = document.getElementById('video'); v.src = u; v.load(); }, url);
+      const waitToast = async (re) => {
+        const t0 = Date.now();
+        for (;;) {
+          const t = await page.evaluate(() => { const e = document.getElementById('toast'); return e.hidden ? '' : e.textContent; });
+          if (re.test(t)) return t;
+          if (Date.now() - t0 > 20000) assert.fail(`message attendu ${re}, reçu : « ${t} »`);
+          await sleep(100);
+        }
+      };
+      // 1. le serveur refuse la requête (jeton erroné) : le code HTTP est donné
+      await clearToast();
+      await playFrom(`/media/${id}/proxy.webm?token=mauvais`);
+      assert.match(await waitToast(/HTTP 401/), /adresse affichée dans le terminal/);
+      // 2. un navigateur qui ne lit pas le VP9
+      await page.evaluate(() => { window.__canPlay = HTMLMediaElement.prototype.canPlayType; HTMLMediaElement.prototype.canPlayType = () => ''; });
+      await clearToast();
+      await playFrom(`/media/${id}/proxy.webm?token=mauvais`);
+      assert.match(await waitToast(/VP9/), /Firefox ou Chromium/);
+      await page.evaluate(() => { HTMLMediaElement.prototype.canPlayType = window.__canPlay; });
+      // 3. un aperçu illisible : le serveur le sert, le navigateur ne peut pas le décoder
+      const proxy = path.join(app.home, 'projects', id, 'proxy.webm');
+      const good = readFileSync(proxy);
+      writeFileSync(proxy, Buffer.alloc(5000, 7));
+      try {
+        await clearToast();
+        await page.evaluate(() => window.__x3.openProject(window.__x3.S.proj.source.path));
+        const msg = await waitToast(/décoder/);
+        assert.ok(msg.includes(`projects/${id}`), msg);
+      } finally {
+        writeFileSync(proxy, good);
+      }
+      page.errors.length = 0; // le navigateur journalise ces échecs voulus (401, lecture impossible)
     });
   });
 });

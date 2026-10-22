@@ -8,7 +8,7 @@ et **encoder**.
 
 | Module | Rôle |
 |---|---|
-| `media` | Sonde (`ffprobe`) : organisation du fichier (deux flux, deux fichiers `_00_`/`_10_`, fisheye côte à côte, équirectangulaire), cadence, durée, audio, signature de fin des `.insv` |
+| `media` | Sonde (`ffprobe`) : organisation du fichier (deux flux, deux fichiers `_00_`/`_10_`, fisheye côte à côte, équirectangulaire), cadence, durée, audio, signature de fin des `.insv`. Un flux 2:1 est « fisheye côte à côte » s'il porte une marque Insta360 (`.insv`, `.lrv`, signature) ou si une image montre deux cercles sur fond noir ; sinon c'est un panorama |
 | `geometry` | Rotations, quaternions, interpolation de keyframes (smoothstep, cap par le plus court chemin) |
 | `calibration` | Modèle des deux objectifs (champ, rotations fines, fondu, inversion) |
 | `render` | Rendu direct objectifs → vue (`flat`, `fisheye`, `planet`, `equirect`), parallèle (`rayon`) |
