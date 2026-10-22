@@ -249,6 +249,16 @@ fn index_and_static_files() {
     assert_eq!(anon("/nope.js", &[]).status, 404);
     assert_eq!(anon("/web/app.js", &[]).status, 404);
     assert_eq!(s.request("HEAD", "/app.js", None, false, &[]).status, 200);
+    // en-têtes de sécurité : pas de contenu extérieur, pas d'intégration dans une autre page, pas de Referer
+    let csp = page.header("content-security-policy").expect("CSP sur la page");
+    for part in
+        ["default-src 'none'", "script-src 'self'", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'"]
+    {
+        assert!(csp.contains(part), "{part} absent de {csp}");
+    }
+    assert!(!csp.contains("unsafe-inline") && !csp.contains("unsafe-eval") && !csp.contains('*'));
+    assert_eq!((page.header("x-frame-options"), page.header("referrer-policy")), (Some("DENY"), Some("no-referrer")));
+    assert_eq!(js.header("x-frame-options"), Some("DENY"));
     // le jeton d'API n'apparaît que dans la page servie avec la clé
     assert!(!anon("/app.js", &[]).text().contains(&s.token));
 }

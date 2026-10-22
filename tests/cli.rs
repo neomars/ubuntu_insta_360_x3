@@ -503,3 +503,24 @@ fn the_gui_server_stops_cleanly_on_sigint_during_an_export() {
         std::fs::read_dir(&out_dir).map(|d| d.flatten().map(|f| f.path()).collect()).unwrap_or_default();
     assert!(files.is_empty(), "sortie partielle : {files:?}");
 }
+
+#[test]
+fn the_gui_reports_startup_problems_without_panicking() {
+    let e = Env::new();
+    // port déjà pris
+    let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = taken.local_addr().unwrap().port().to_string();
+    let r = e.x3(&["gui", "--no-browser", "--port", &port]);
+    assert_eq!(r.status.code(), Some(1));
+    let err = text(&r.stderr);
+    assert!(err.starts_with("Erreur : ") && !err.contains("panicked"), "{err}");
+    // vidéo à ouvrir introuvable
+    let r = e.x3(&["gui", "--no-browser", p(&e.out("absent.insv"))]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("introuvable"), "{}", text(&r.stderr));
+    // `x3studio fichier` (sans sous-commande) ouvre aussi l'interface : même erreur
+    let r = e.x3(&[p(&e.out("absent.insv"))]);
+    assert_eq!(r.status.code(), Some(1));
+    // port invalide : erreur d'usage
+    assert_eq!(e.x3(&["gui", "--port", "70000"]).status.code(), Some(2));
+}

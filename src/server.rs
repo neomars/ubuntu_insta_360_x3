@@ -31,6 +31,11 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
+/// L'interface n'a ni script ni style intégré, ne charge rien hors du serveur et n'est pas intégrable dans une
+/// autre page : tout le reste est interdit.
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; \
+                   connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const VIEWER_JS: &str = include_str!("../web/viewer.js");
@@ -193,6 +198,9 @@ async fn guard(State(st): State<ServerState>, req: Request, next: Next) -> Respo
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    // l'adresse de la page contient la clé de lancement : elle ne doit jamais partir dans un en-tête Referer
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     resp
 }
 
@@ -221,6 +229,7 @@ async fn index(State(st): State<ServerState>, headers: HeaderMap, req: Request) 
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CONTENT_SECURITY_POLICY, CSP.to_string()),
             (header::SET_COOKIE, format!("x3session={}; HttpOnly; SameSite=Strict; Path=/", st.token)),
         ],
         html,

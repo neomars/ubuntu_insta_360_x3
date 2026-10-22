@@ -9,6 +9,21 @@ export const BIN = process.env.X3STUDIO_BIN || path.resolve(import.meta.dirname,
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Attend qu'une fonction évaluée dans la page renvoie une valeur vraie. Interrogation par `page.evaluate` (protocole
+ * du navigateur) plutôt que `page.waitForFunction`, qui évalue du texte dans la page : la politique de sécurité de
+ * l'interface (`script-src 'self'`, sans `unsafe-eval`) l'interdit, et les tests doivent la laisser active.
+ */
+export async function waitFor(page, fn, { timeout = 30000, interval = 100, arg } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const value = await page.evaluate(fn, arg);
+    if (value) return value;
+    if (Date.now() - t0 > timeout) throw new Error(`délai dépassé en attendant : ${fn}`);
+    await sleep(interval);
+  }
+}
+
 /** Vidéo `.insv` synthétique (deux objectifs fisheye, caméra qui tremble) générée par `x3studio demo`. */
 export function makeDemo(file, { seconds = 2.5, lens = 480, motion = 'shake' } = {}) {
   execFileSync(BIN, ['demo', file, '--seconds', String(seconds), '--lens', String(lens), '--motion', motion], { stdio: 'pipe' });
@@ -79,7 +94,7 @@ export async function openAndWait(page, file) {
   await page.fill('#fs-path', path.dirname(file));
   await page.click('#fs-go');
   await page.click(`#fs-list li:has-text("${path.basename(file)}")`);
-  await page.waitForFunction('window.__x3.S.videoReady === true', null, { timeout: 120000 });
+  await waitFor(page, () => window.__x3.S.videoReady === true, { timeout: 120000 });
   for (let i = 0; i < 300; i++) {
     const ready = await page.evaluate("window.__x3.api('GET', '/api/project/' + window.__x3.S.proj.id).then(p => p.analysis.ready)");
     if (ready) break;
@@ -90,10 +105,10 @@ export async function openAndWait(page, file) {
 
 /** Attend que la vidéo ait fini de se positionner (pas de saut en cours, image décodée) puis que l'aperçu soit redessiné. */
 export async function settle(page, timeout = 20000) {
-  await page.waitForFunction(() => {
+  await waitFor(page, () => {
     const v = document.getElementById('video');
     return !v.seeking && v.readyState >= 2;
-  }, null, { timeout });
+  }, { timeout });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   await sleep(250);
 }

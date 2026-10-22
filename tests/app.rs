@@ -237,3 +237,36 @@ fn info_reports_the_environment() {
     let enc: Vec<&str> = i["encoders"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
     assert!(enc.contains(&"libx264"), "{enc:?}");
 }
+
+#[test]
+fn cancelling_the_preview_removes_the_partial_file() {
+    let f = fixture();
+    let p = f.app.open_project(&shake(), false).unwrap();
+    let cancel = AtomicBool::new(false);
+    let e = f
+        .app
+        .prepare_sync(
+            &p,
+            true,
+            &|label, frac| {
+                if label == "aperçu" && frac > 0.05 {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed)
+                }
+            },
+            &cancel,
+        )
+        .unwrap_err();
+    assert!(x3studio::error::is_cancelled(&e), "{e}");
+    assert!(
+        !p.proxy_path().exists() && !p.proxy_path().with_extension("part").exists(),
+        "ni aperçu ni fichier temporaire"
+    );
+    assert!(!p.has_proxy() && p.orientation().is_none());
+    // la tâche d'aperçu annulée par l'interface : état annulé, rien n'est enchaîné ensuite
+    let job = f.app.ensure_proxy(&p).unwrap().expect("tâche d'aperçu");
+    assert!(f.app.jobs.cancel(&job.id));
+    assert_eq!(f.app.jobs.wait(&job.id, 60.0).unwrap().state(), JobState::Cancelled);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!p.has_proxy() && !p.proxy_path().with_extension("part").exists());
+    assert!(f.app.jobs.active(&p.id, "analyze").is_none(), "pas d'analyse sans aperçu");
+}
