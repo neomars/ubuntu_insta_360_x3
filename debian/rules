@@ -1,0 +1,8 @@
+#!/usr/bin/make -f
+
+export PYBUILD_NAME=x3studio
+# Les tests (media synthétiques, navigateur Chromium) sont lancés à part : `pytest`.
+export PYBUILD_DISABLE=test
+
+%:
+	dh $@ --buildsystem=pybuild

@@ -11,3 +11,17 @@ dist/
 *.mp4
 *.webm
 .x3studio-cache/
+
+# paquet .deb
+debian/.debhelper/
+debian/x3studio/
+debian/files
+debian/*.substvars
+debian/*.debhelper.log
+debian/debhelper-build-stamp
+.pybuild/
+dist/
+*.deb
+*.ddeb
+*.buildinfo
+*.changes

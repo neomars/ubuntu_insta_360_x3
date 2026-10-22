@@ -31,14 +31,31 @@ l'interface n'écoute que sur `127.0.0.1`.
 
 ## Installation (Ubuntu 22.04 / 24.04)
 
+### Paquet .deb (recommandé)
+
 ```bash
 git clone https://github.com/neomars/ubuntu_insta_360_x3 && cd ubuntu_insta_360_x3
+sudo apt install build-essential debhelper dh-sequence-python3 pybuild-plugin-pyproject \
+                 python3-all python3-setuptools fakeroot
+./packaging/build-deb.sh                          # -> dist/x3studio_0.1.0_all.deb
+sudo apt install ./dist/x3studio_0.1.0_all.deb    # tire ffmpeg, python3-numpy et python3-opencv
+```
+
+Le paquet (`Architecture: all`) installe `/usr/bin/x3studio`, le module Python dans
+`/usr/lib/python3/dist-packages/x3studio/`, une entrée de menu « X3 Studio Local » avec son icône, la page de
+manuel (`man x3studio`) et la documentation. Dépendances : `ffmpeg`, `python3-numpy` ; recommandés :
+`python3-opencv` (stabilisation et rendu rapide), `xdg-utils`. Désinstallation : `sudo apt remove x3studio`
+(les caches et réglages de `~/.cache/x3studio` et les exports restent à vous).
+
+### Sans paquet
+
+```bash
 ./install.sh          # apt : ffmpeg, python3-numpy, python3-opencv ; venv ; commande `x3studio`
 ```
 
-Sans installation, depuis le dépôt : `sudo apt install ffmpeg python3-numpy python3-opencv` puis
-`python3 -m x3studio`. OpenCV est facultatif mais recommandé : sans lui il n'y a ni stabilisation
-ni moteur de rendu rapide (l'export se fait alors uniquement avec FFmpeg, bien plus lentement dès que la vue bouge).
+Ou, depuis le dépôt : `sudo apt install ffmpeg python3-numpy python3-opencv` puis `python3 -m x3studio`.
+OpenCV est facultatif mais recommandé : sans lui il n'y a ni stabilisation ni moteur de rendu rapide
+(l'export se fait alors uniquement avec FFmpeg, bien plus lentement dès que la vue bouge).
 
 ## Utilisation
 

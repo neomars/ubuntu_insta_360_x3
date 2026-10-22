@@ -9,7 +9,7 @@ description = "Traitement 100 % local des vidéos Insta360 X3 : assemblage, reca
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["numpy>=1.22"]
+dependencies = ["numpy>=1.21"]
 
 [project.optional-dependencies]
 stabilisation = ["opencv-python-headless>=4.5"]
