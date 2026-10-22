@@ -150,7 +150,9 @@ def encoder_args(s: ExportSettings) -> list[str]:
 
 
 def _clip_range(src: Source, s: ExportSettings) -> tuple[float, float]:
-    start = max(0.0, min(s.start, max(0.0, src.duration - 0.05)))
+    start = max(0.0, s.start)
+    if start >= src.duration - 0.05:
+        raise ExportError("Le début de la plage dépasse la durée de la vidéo.")
     end = s.end if s.end and s.end > start else src.duration
     end = min(end, src.duration)
     if end - start < 0.05:

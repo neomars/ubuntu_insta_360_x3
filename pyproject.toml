@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x3studio-local"
+version = "0.1.0"
+description = "Traitement 100 % local des vidéos Insta360 X3 : assemblage, recadrage 360°, stabilisation, export."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+stabilisation = ["opencv-python-headless>=4.5"]
+dev = ["pytest>=7", "opencv-python-headless>=4.5", "playwright>=1.40"]
+
+[project.scripts]
+x3studio = "x3studio.cli:main"
+
+[tool.setuptools]
+packages = ["x3studio"]
+
+[tool.setuptools.package-data]
+x3studio = ["web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["ui: tests du navigateur (Chromium + Playwright)", "slow: tests longs"]

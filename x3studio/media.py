@@ -7,7 +7,8 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-INSTA360_TRAILER_MAGIC = bytes.fromhex("8db42d694ccc418790edff439fe026bf")
+# les 32 derniers octets des fichiers Insta360 sont cette chaîne ASCII (fin des métadonnées embarquées)
+INSTA360_TRAILER_MAGIC = b"8db42d694ccc418790edff439fe026bf"
 
 # Nom de fichier des caméras Insta360 : VID_20240101_120000_00_001.insv
 _INSV_RE = re.compile(r"^(?P<prefix>(?:PRO_)?VID_\d{8}_\d{6})_(?P<lens>00|10)_(?P<num>\d+)\.insv$", re.I)

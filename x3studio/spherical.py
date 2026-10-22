@@ -41,37 +41,8 @@ def _boxes(data: bytes, start: int, end: int):
 
 
 def inject_spherical_v1(path: str | Path) -> bool:
-    """Retourne True si les métadonnées ont été ajoutées."""
+    """Retourne True si les métadonnées ont été ajoutées (seul ``moov``, en fin de fichier, est réécrit)."""
     path = Path(path)
-    data = path.read_bytes() if path.stat().st_size < (1 << 31) else None
-    if data is None:  # gros fichier : on ne lit que la fin (moov)
-        return _inject_large(path)
-    top = list(_boxes(data, 0, len(data)))
-    if not top or top[-1][2] != b"moov":
-        return False
-    mpos, msize, _, mhdr = top[-1]
-    if mhdr != 8:
-        return False
-    for tpos, tsize, ttyp, thdr in _boxes(data, mpos + mhdr, mpos + msize):
-        if ttyp != b"trak" or thdr != 8:
-            continue
-        if b"vide" not in data[tpos:tpos + tsize][:400]:
-            continue
-        payload = SPHERICAL_UUID + XML.encode()
-        box = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
-        tend = tpos + tsize
-        new = bytearray(data[:tend] + box + data[tend:])
-        struct.pack_into(">I", new, tpos, tsize + len(box))
-        struct.pack_into(">I", new, mpos, msize + len(box))
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(bytes(new))
-        tmp.replace(path)
-        return True
-    return False
-
-
-def _inject_large(path: Path) -> bool:  # pragma: no cover - fichiers > 2 Gio
-    """Variante pour les gros fichiers : seul moov (en fin de fichier) est réécrit."""
     with open(path, "rb") as f:
         f.seek(0, 2)
         total = f.tell()
@@ -84,30 +55,41 @@ def _inject_large(path: Path) -> bool:  # pragma: no cover - fichiers > 2 Gio
                 size = struct.unpack(">Q", f.read(8))[0]
             elif size == 0:
                 size = total - pos
+            if size < 8:
+                return False
             if typ == b"moov":
                 moov = (pos, size)
             pos += size
-        if not moov or moov[0] + moov[1] != total:
+        if not moov or moov[0] + moov[1] != total or moov[1] > (1 << 30):
             return False
         f.seek(moov[0])
         mdata = f.read(moov[1])
-    top = list(_boxes(mdata, 0, len(mdata)))
-    mhdr = top[0][3]
-    for tpos, tsize, ttyp, thdr in _boxes(mdata, mhdr, len(mdata)):
-        if ttyp == b"trak" and b"vide" in mdata[tpos:tpos + tsize][:400]:
-            payload = SPHERICAL_UUID + XML.encode()
-            box = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
-            tend = tpos + tsize
-            new = bytearray(mdata[:tend] + box + mdata[tend:])
-            struct.pack_into(">I", new, tpos, tsize + len(box))
-            struct.pack_into(">I", new, 0, len(mdata) + len(box))
-            with open(path, "r+b") as f:
-                f.seek(moov[0])
-                f.write(bytes(new))
-            return True
+    try:
+        top = list(_boxes(mdata, 0, len(mdata)))
+        mhdr = top[0][3]
+        if mhdr != 8:
+            return False
+        for tpos, tsize, ttyp, thdr in _boxes(mdata, mhdr, len(mdata)):
+            if ttyp == b"trak" and thdr == 8 and b"vide" in mdata[tpos:tpos + tsize][:400]:
+                payload = SPHERICAL_UUID + XML.encode()
+                box = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
+                tend = tpos + tsize
+                new = bytearray(mdata[:tend] + box + mdata[tend:])
+                struct.pack_into(">I", new, tpos, tsize + len(box))
+                struct.pack_into(">I", new, 0, len(mdata) + len(box))
+                with open(path, "r+b") as f:
+                    f.seek(moov[0])
+                    f.write(bytes(new))
+                return True
+    except ValueError:
+        return False
     return False
 
 
 def has_spherical_v1(path: str | Path) -> bool:
-    data = Path(path).read_bytes()
-    return SPHERICAL_UUID in data
+    """Vrai si la boîte ``uuid`` sphérique est présente (lit la fin du fichier, où se trouve ``moov``)."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        n = f.tell()
+        f.seek(max(0, n - (8 << 20)))
+        return SPHERICAL_UUID in f.read()

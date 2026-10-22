@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=X3 Studio Local
+GenericName=Montage vidéo 360°
+Comment=Traitement local des vidéos Insta360 X3
+Exec=x3studio
+Icon=camera-video
+Terminal=true
+Categories=AudioVideo;Video;
