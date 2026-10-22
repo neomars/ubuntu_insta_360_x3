@@ -1,27 +1,20 @@
-__pycache__/
-*.pyc
-*.egg-info/
-.venv/
-build/
+# Rust
+target/
+
+# paquet .deb (packaging/build-deb.sh -> dist/) et publication (workflow Build -> release/)
 dist/
-.pytest_cache/
+release/
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+
+# tests d'interface
+node_modules/
+
 # données locales / médias de test
 *.insv
 *.lrv
 *.mp4
 *.webm
 .x3studio-cache/
-
-# paquet .deb
-debian/.debhelper/
-debian/x3studio/
-debian/files
-debian/*.substvars
-debian/*.debhelper.log
-debian/debhelper-build-stamp
-.pybuild/
-dist/
-*.deb
-*.ddeb
-*.buildinfo
-*.changes

@@ -1,0 +1,202 @@
+name: Build
+
+# Produit le paquet Ubuntu (.deb) de X3 Studio Local (Rust, amd64) et le joint à une release GitHub.
+#
+# Le lancer :
+#   • release : créer le tag d'une release `v*` — dans GitHub (Releases → Draft a new release, tag créé « sur main ») ou
+#     en ligne de commande (git tag v1.1.0 && git push origin v1.1.0) → le .deb est construit, contrôlé (tests, lintian,
+#     installation) puis joint à la release (créée si besoin) avec sa somme SHA-256.
+#     ⚠ GitHub lit le workflow DANS LE COMMIT TAGUÉ : un tag posé sur un commit antérieur à ce fichier (ou à une
+#     correction du workflow) ne déclenche rien. Tagger le dernier commit de main.
+#   • release qui n'a pas de .deb : onglet Actions → Build → « Run workflow » (branche main) et, dans « Tag de la
+#     release », le tag de cette release (ex. v1.0.0) : le .deb construit depuis main est ajouté à la release existante,
+#     sans toucher à son texte ni à son tag. « Code à construire » permet d'en choisir un autre (branche, tag, commit) ;
+#     le commit réellement construit est noté dans le VERSIONS.txt joint.
+#   • essai : le même « Run workflow » en laissant « Tag de la release » vide : rien n'est publié ; le .deb est
+#     téléchargeable dans les « Artifacts » de l'exécution pendant 1 jour.
+#
+# Où va le .deb : directement à la release (commande `gh release upload`), sans passer par le stockage d'artefacts ;
+# seul un essai garde un artefact, 1 jour.
+#
+# La version vient du tag (v1.1.0 → 1.1.0 ; v1.1.0-beta.1 → préversion GitHub). Un lancement manuel peut en donner une ;
+# sans elle, c'est celle du « Tag de la release », à défaut celle de Cargo.toml.
+#
+# Le paquet est construit sur Ubuntu 22.04 (glibc 2.35) : il s'installe sur 22.04, 24.04 et plus récent.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de la release EXISTANTE à laquelle joindre le .deb (ex. v1.0.0). Vide = simple essai, rien n'est publié."
+        required: false
+        default: ""
+      ref:
+        description: "Code à construire : branche, tag ou commit (ex. main). Vide = la branche choisie dans « Use workflow from »."
+        required: false
+        default: ""
+      version:
+        description: "Version du paquet (ex. 1.1.0). Vide = celle du tag ci-dessus, à défaut celle de Cargo.toml."
+        required: false
+        default: ""
+
+# Une seule construction à la fois pour un même tag ou une même branche (un double clic ne la lance pas deux fois).
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    # Écriture : joindre le .deb à la release (étapes « Publish » / « Attach », en fin de job).
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }} # vide = le code qui a déclenché l'exécution
+          persist-credentials: false # le jeton d'écriture ne reste pas dans .git/config : seules les étapes de publication le reçoivent
+
+      # Tag et version sont vérifiés AVANT la construction : une faute de frappe se voit tout de suite.
+      # Les saisies passent par l'environnement, pas par le script : elles ne peuvent pas y injecter de commande.
+      - name: Work out the release tag and the version
+        id: meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          commit="$(git rev-parse HEAD)"
+          code="${INPUT_REF:-$REF_NAME}"
+          tag=""
+          if [ "$REF_TYPE" = tag ]; then tag="$REF_NAME"; else tag="$INPUT_TAG"; fi
+          version="$INPUT_VERSION"
+          if [ -z "$version" ] && [ -n "$tag" ]; then version="${tag#v}"; fi
+          if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::Tag « $tag » invalide : attendu v1.2.3 (ou v1.2.3-beta.1, -alpha.N, -rc.N)."; exit 1
+          fi
+          if [ -n "$version" ] && ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::Version « $version » invalide : attendu 1.2.3 (ou 1.2.3-beta.1)."; exit 1
+          fi
+          prerelease=false; case "$version" in *-*) prerelease=true ;; esac
+          { echo "tag=$tag"; echo "version=$version"; echo "commit=$commit"; echo "code=$code"; echo "prerelease=$prerelease"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Construction du .deb"
+            echo "- Code construit : \`$commit\` ($code)"
+            echo "- Version du paquet : \`${version:-celle de Cargo.toml}\`"
+            if [ -z "$tag" ]; then echo "- Essai : rien ne sera publié (le .deb sera dans les Artifacts, pendant 1 jour)"; else echo "- Release visée : \`$tag\` (le .deb lui sera joint directement)"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Lancement manuel visant une release : elle doit exister (le .deb y est AJOUTÉ). Vérifié tout de suite, pas après la
+      # construction : une release oubliée ou mal orthographiée se voit en quelques secondes.
+      - name: Check that the target release exists
+        if: steps.meta.outputs.tag != '' && github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::La release « $TAG » n'existe pas : crée-la d'abord (Releases → Draft a new release), puis relance."
+            exit 1
+          fi
+
+      - name: Install build and check tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg lintian desktop-file-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      # Les tests passent avant l'empaquetage : un paquet cassé ne part pas en release.
+      - name: Format, clippy, tests
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+      # Après les tests : changer la version rend Cargo.lock obsolète pour `cargo test --locked` (le script le met à jour).
+      - name: Set the version
+        if: steps.meta.outputs.version != ''
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: ./packaging/set-version.sh "$VERSION"
+
+      - name: Build the .deb
+        run: ./packaging/build-deb.sh
+
+      - name: Lint the .deb
+        run: lintian --fail-on error,warning dist/*.deb
+
+      # Le paquet est installé, essayé (démo, exports, interface), puis désinstallé : un .deb inutilisable ne part pas en release.
+      - name: Install and try the .deb
+        run: ./packaging/smoke-test-deb.sh dist/*.deb
+
+      # Dans le VERSIONS.txt joint à la release (pas dans le paquet) : de quel commit vient ce .deb.
+      - name: Record which commit was built
+        env:
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          CODE: ${{ steps.meta.outputs.code }}
+        run: |
+          mkdir -p release
+          cp dist/*.deb release/
+          {
+            echo "x3studio : commit $COMMIT ($CODE)"
+            echo "rustc : $(rustc --version)"
+            echo "cargo-deb : $(cargo deb --version 2>/dev/null || true)"
+            echo "construit sur : $(. /etc/os-release && echo "$PRETTY_NAME")"
+          } > release/VERSIONS.txt
+          (cd release && sha256sum -- *.deb > SHA256SUMS)
+
+      - name: Show what was built
+        run: |
+          ls -lh release
+          cat release/SHA256SUMS release/VERSIONS.txt
+          dpkg-deb -I release/*.deb
+
+      # Tag poussé : la release est créée (ou complétée) avec ses notes générées ; une préversion reste « pre-release ».
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.tag != '' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            flags=(--generate-notes --verify-tag)
+            [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Version ${TAG#v}" "${flags[@]}"
+          fi
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+
+      # Lancement manuel : on AJOUTE le .deb à une release qui existe déjà (texte, tag et statut « dernière version » restent
+      # tels quels).
+      - name: Attach the package to the existing release
+        if: steps.meta.outputs.tag != '' && github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          {
+            echo "### .deb joint à la release \`$TAG\`"
+            for f in release/*; do echo "- ${f##*/}"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Essai (aucune release visée) : le .deb n'a nulle part où aller, on le garde 1 jour en artefact.
+      - name: Upload the trial package
+        if: steps.meta.outputs.tag == '' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x3studio-linux
+          path: release/*
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0 # un .deb est déjà compressé

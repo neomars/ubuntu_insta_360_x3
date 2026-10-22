@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x3-token" content="__X3_TOKEN__">
+<title>X3 Studio Local</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%233b9eff' stroke-width='4'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%238a6bff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo" aria-hidden="true"></span>X3 Studio <small>local</small></div>
+  <button id="btn-open" class="btn primary">Ouvrir une vidéo…</button>
+  <div id="file-info" class="file-info" aria-live="polite">Aucune vidéo ouverte</div>
+  <div class="spacer"></div>
+  <span id="badge-local" class="chip ok" title="Aucune donnée n'est envoyée sur Internet">Traitement 100 % local</span>
+  <button id="btn-help" class="btn ghost" aria-label="Raccourcis clavier">?</button>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="viewer-wrap">
+      <canvas id="gl" aria-label="Aperçu 360°"></canvas>
+      <video id="video" class="vhid" playsinline preload="auto"></video>
+      <div id="overlay-msg" class="overlay-msg" hidden></div>
+      <div class="hud hud-tl">
+        <label class="sel"><span>Projection</span>
+          <select id="proj">
+            <option value="flat">Plat (rectiligne)</option>
+            <option value="fisheye">Fisheye</option>
+            <option value="planet">Petite planète</option>
+          </select>
+        </label>
+        <button id="btn-reset-view" class="btn small ghost" title="Revenir à la vue de face (double-clic sur l'image)">Recentrer</button>
+      </div>
+      <div class="hud hud-tr">
+        <button id="btn-snap" class="btn small" title="Enregistrer l'image affichée en JPEG pleine résolution">Capturer l'image</button>
+      </div>
+      <div class="hud hud-bl" id="hud-readout" aria-hidden="true"></div>
+      <div class="hud hud-br" id="hud-hint">Glisser : orienter · Molette : zoom</div>
+    </div>
+
+    <div class="transport">
+      <button id="btn-play" class="btn icon" aria-label="Lecture / pause" title="Espace">▶</button>
+      <div id="time" class="time">0:00.0 / 0:00.0</div>
+      <div id="timeline" class="timeline" role="slider" aria-label="Position" tabindex="0">
+        <div class="trim-shade" id="trim-l"></div><div class="trim-shade" id="trim-r"></div>
+        <div id="kf-layer"></div>
+        <div id="playhead" class="playhead"></div>
+      </div>
+      <button id="btn-kf" class="btn" title="Ajouter un keyframe avec la vue actuelle (K)">◆ Keyframe</button>
+      <button id="btn-in" class="btn" title="Début de l'export (I)">[ Début</button>
+      <button id="btn-out" class="btn" title="Fin de l'export (O)">Fin ]</button>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="reframe" role="tab">Recadrage</button>
+      <button class="tab" data-tab="stab" role="tab">Stabilisation</button>
+      <button class="tab" data-tab="lens" role="tab">Objectifs</button>
+      <button class="tab" data-tab="export" role="tab">Export</button>
+      <button class="tab" data-tab="jobs" role="tab">Tâches <span id="jobs-badge" class="badge" hidden>0</span></button>
+    </nav>
+
+    <section class="pane active" id="pane-reframe">
+      <h3>Vue actuelle</h3>
+      <div class="field"><label for="v-yaw">Cap (lacet)</label><input id="v-yaw" type="range" min="-180" max="180" step="0.5"><output id="o-yaw"></output></div>
+      <div class="field"><label for="v-pitch">Inclinaison</label><input id="v-pitch" type="range" min="-90" max="90" step="0.5"><output id="o-pitch"></output></div>
+      <div class="field"><label for="v-roll">Roulis</label><input id="v-roll" type="range" min="-180" max="180" step="0.5"><output id="o-roll"></output></div>
+      <div class="field"><label for="v-fov">Champ de vision</label><input id="v-fov" type="range" min="20" max="150" step="1"><output id="o-fov"></output></div>
+      <p class="hint">Sans keyframe, la vue est la même pour toute la vidéo. Placez-vous sur un instant, orientez la vue puis ajoutez un keyframe : la caméra virtuelle se déplace en douceur d'un keyframe au suivant.</p>
+      <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
+      <ul id="kf-list" class="kf-list"></ul>
+      <p id="kf-empty" class="hint">Aucun keyframe.</p>
+    </section>
+
+    <section class="pane" id="pane-stab">
+      <h3>Stabilisation</h3>
+      <div class="radio-group" id="stab-mode">
+        <label><input type="radio" name="stab" value="off" checked> Désactivée</label>
+        <label><input type="radio" name="stab" value="smooth"> Lissage — supprime les tremblements, suit les mouvements lents</label>
+        <label><input type="radio" name="stab" value="horizon"> Horizon — garde l'horizon à plat, le cap est lissé</label>
+        <label><input type="radio" name="stab" value="lock"> Verrouillage — la direction ne bouge plus (trépied virtuel)</label>
+      </div>
+      <div class="field"><label for="s-strength">Force du lissage</label><input id="s-strength" type="range" min="0.1" max="5" step="0.1" value="1"><output id="o-strength"></output></div>
+      <div class="field" id="f-heading"><label for="s-heading">Lissage du cap</label><input id="s-heading" type="range" min="0" max="6" step="0.1" value="1.5"><output id="o-heading"></output></div>
+      <div id="analysis-status" class="status-box"></div>
+      <button id="btn-analyze" class="btn">Recalculer l'analyse du mouvement</button>
+      <h3>Orientation / horizon</h3>
+      <div class="field"><label for="orient-yaw">Recentrer (cap)</label><input id="orient-yaw" type="range" min="-180" max="180" step="0.5" value="0"><output></output></div>
+      <div class="field"><label for="orient-pitch">Inclinaison</label><input id="orient-pitch" type="range" min="-60" max="60" step="0.5" value="0"><output></output></div>
+      <div class="field"><label for="orient-roll">Mise à niveau (roulis)</label><input id="orient-roll" type="range" min="-45" max="45" step="0.25" value="0"><output></output></div>
+      <div class="row"><button id="btn-center-here" class="btn small">Définir la vue actuelle comme « avant »</button><button id="btn-orient-reset" class="btn small ghost">Réinitialiser</button></div>
+      <p class="hint">Le mouvement est estimé par suivi de points dans l'image (aucun gyroscope requis). L'horizon est celui de la première image : corrigez-le ici si la caméra n'était pas d'aplomb.</p>
+    </section>
+
+    <section class="pane" id="pane-lens">
+      <h3>Assemblage des deux objectifs</h3>
+      <p class="hint">À ajuster une fois si la couture ou l'orientation vous paraît fausse (aperçu en direct).</p>
+      <div class="field"><label for="c-fov">Champ de chaque objectif</label><input id="c-fov" type="range" min="180" max="230" step="0.5"><output></output></div>
+      <div class="field"><label for="c-blend">Largeur du fondu</label><input id="c-blend" type="range" min="0" max="30" step="0.5"><output></output></div>
+      <details><summary>Réglages fins par objectif</summary>
+        <div class="field"><label>Avant — cap</label><input id="c-a_yaw" type="range" min="-10" max="10" step="0.1"><output></output></div>
+        <div class="field"><label>Avant — inclinaison</label><input id="c-a_pitch" type="range" min="-10" max="10" step="0.1"><output></output></div>
+        <div class="field"><label>Avant — roulis</label><input id="c-a_roll" type="range" min="-180" max="180" step="0.1"><output></output><button type="button" id="c-a_turn" class="btn small ghost" title="Pivoter l'image de cet objectif de 90°">↻ 90°</button></div>
+        <div class="field"><label>Arrière — cap</label><input id="c-b_yaw" type="range" min="-10" max="10" step="0.1"><output></output></div>
+        <div class="field"><label>Arrière — inclinaison</label><input id="c-b_pitch" type="range" min="-10" max="10" step="0.1"><output></output></div>
+        <div class="field"><label>Arrière — roulis</label><input id="c-b_roll" type="range" min="-180" max="180" step="0.1"><output></output><button type="button" id="c-b_turn" class="btn small ghost" title="Pivoter l'image de cet objectif de 90°">↻ 90°</button></div>
+      </details>
+      <label class="check"><input type="checkbox" id="c-swap"> Inverser les deux objectifs (avant ↔ arrière)</label>
+      <label class="check"><input type="checkbox" id="c-seam"> Afficher la zone de fondu (magenta)</label>
+      <button id="btn-calib-reset" class="btn small ghost">Valeurs par défaut</button>
+    </section>
+
+    <section class="pane" id="pane-export">
+      <h3>Exporter</h3>
+      <div class="field"><label for="e-mode">Type</label>
+        <select id="e-mode">
+          <option value="reframe">Vidéo recadrée (plate)</option>
+          <option value="equirect">Vidéo 360° complète (équirectangulaire)</option>
+        </select></div>
+      <div class="field" id="f-size"><label for="e-size">Format</label>
+        <select id="e-size">
+          <option value="1920x1080">1080p — 16:9 (1920×1080)</option>
+          <option value="3840x2160">4K — 16:9 (3840×2160)</option>
+          <option value="1280x720">720p — 16:9 (1280×720)</option>
+          <option value="1080x1920">Vertical 9:16 (1080×1920)</option>
+          <option value="1080x1350">Portrait 4:5 (1080×1350)</option>
+          <option value="1080x1080">Carré 1:1 (1080×1080)</option>
+        </select></div>
+      <div class="field" id="f-size360" hidden><label for="e-size360">Résolution</label>
+        <select id="e-size360">
+          <option value="5760">5,7K (5760×2880)</option>
+          <option value="3840">4K (3840×1920)</option>
+          <option value="2880">3K (2880×1440)</option>
+        </select></div>
+      <div class="field"><label for="e-fps">Images / seconde</label>
+        <select id="e-fps"><option value="0">Identique à la source</option><option>24</option><option>25</option><option>30</option><option>50</option><option>60</option></select></div>
+      <div class="field"><label for="e-speed">Vitesse</label>
+        <select id="e-speed"><option value="0.25">×0,25</option><option value="0.5">×0,5</option><option value="1" selected>×1</option><option value="2">×2</option><option value="4">×4</option><option value="8">×8</option></select></div>
+      <div class="field"><label for="e-codec">Codec</label>
+        <select id="e-codec"><option value="h264">H.264 (compatible partout)</option><option value="h265">H.265 / HEVC (plus léger)</option></select></div>
+      <div class="field"><label for="e-crf">Qualité</label>
+        <select id="e-crf"><option value="17">Très haute</option><option value="20" selected>Haute</option><option value="24">Standard</option><option value="28">Légère</option></select></div>
+      <label class="check"><input type="checkbox" id="e-audio" checked> Conserver le son</label>
+      <div class="field"><label for="e-dir">Dossier de sortie</label><input id="e-dir" type="text" spellcheck="false"></div>
+      <div id="export-summary" class="status-box"></div>
+      <div class="row">
+        <button id="btn-export" class="btn primary" disabled>Lancer l'export</button>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-jobs">
+      <h3>Tâches</h3>
+      <ul id="job-list" class="job-list"></ul>
+      <p id="job-empty" class="hint">Aucune tâche.</p>
+    </section>
+  </aside>
+</main>
+
+<dialog id="dlg-open">
+  <form method="dialog" class="dlg">
+    <h2>Ouvrir une vidéo Insta360 X3</h2>
+    <div class="row"><button type="button" id="fs-up" class="btn small">↑ Dossier parent</button><input id="fs-path" type="text" spellcheck="false"><button type="button" id="fs-go" class="btn small">Aller</button></div>
+    <ul id="fs-list" class="fs-list"></ul>
+    <p class="hint">Fichiers .insv (ou vidéos 360° .mp4 déjà assemblées). Les fichiers restent sur votre disque.</p>
+    <div class="row end"><button value="cancel" class="btn">Fermer</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-help">
+  <form method="dialog" class="dlg">
+    <h2>Raccourcis</h2>
+    <table class="keys">
+      <tr><td><kbd>Espace</kbd></td><td>Lecture / pause</td></tr>
+      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Image précédente / suivante (Maj : 1 s)</td></tr>
+      <tr><td><kbd>K</kbd></td><td>Ajouter un keyframe</td></tr>
+      <tr><td><kbd>I</kbd> <kbd>O</kbd></td><td>Début / fin de l'export</td></tr>
+      <tr><td>Double-clic</td><td>Recentrer la vue</td></tr>
+    </table>
+    <div class="row end"><button value="close" class="btn">Fermer</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

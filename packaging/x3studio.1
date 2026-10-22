@@ -15,13 +15,15 @@ x3studio \- traitement local des vidéos Insta360 X3
 \fIFICHIER\fR [\fB\-o\fR \fISORTIE\fR] [\fIOPTIONS\fR]
 .br
 .B x3studio equirect
-\fIFICHIER\fR [\fB\-o\fR \fISORTIE\fR] [\fIOPTIONS\fR]
+\fIFICHIER\fR [\fB\-o\fR \fISORTIE\fR] [\fB\-\-width\fR \fIL\fR] [\fIOPTIONS\fR]
 .br
 .B x3studio snapshot
 \fIFICHIER\fR [\fB\-o\fR \fISORTIE.jpg\fR] [\fB\-\-t\fR \fISECONDES\fR] [\fIOPTIONS\fR]
 .br
 .B x3studio demo
-\fISORTIE.insv\fR [\fB\-\-seconds\fR \fIN\fR] [\fB\-\-motion\fR shake|pan|static]
+\fISORTIE.insv\fR [\fB\-\-seconds\fR \fIN\fR] [\fB\-\-lens\fR \fIPX\fR] [\fB\-\-motion\fR shake|pan|static]
+.br
+.B x3studio \-\-help | \-\-version
 .SH DESCRIPTION
 .B x3studio
 assemble et retravaille les fichiers .insv de la caméra Insta360 X3 : caméra
@@ -34,65 +36,106 @@ Tout est traité localement. Sans argument (ou avec un nom de fichier),
 démarre l'interface web, servie uniquement sur 127.0.0.1, et l'ouvre dans le
 navigateur ; l'adresse complète (avec la clé de session) est affichée dans le
 terminal. Ctrl+C arrête le serveur.
+.PP
+FFmpeg ne sert qu'à décoder et à encoder ; le rendu, l'assemblage des objectifs
+et l'analyse du mouvement sont faits par x3studio lui\-même.
 .SH COMMANDES
 .TP
 .B gui
-Lance l'interface web locale (commande par défaut).
+Lance l'interface web locale (commande par défaut). \fB\-\-port\fR choisit le
+port (0 = automatique), \fB\-\-no\-browser\fR n'ouvre pas le navigateur.
 .TP
 .B probe
 Affiche l'organisation du fichier (deux flux fisheye, deux fichiers, fisheye
 côte à côte ou équirectangulaire), la taille, la cadence et la durée.
+\fB\-\-json\fR donne le résultat en JSON.
 .TP
 .B reframe
 Exporte une vidéo plate. Options : \fB\-\-projection\fR flat|fisheye|planet,
-\fB\-\-size\fR LxH, \fB\-\-yaw\fR, \fB\-\-pitch\fR, \fB\-\-roll\fR, \fB\-\-fov\fR,
-\fB\-\-keyframes\fR \fIFICHIER.json\fR.
+\fB\-\-size\fR \fILxH\fR (défaut 1920x1080, valeurs paires),
+\fB\-\-yaw\fR, \fB\-\-pitch\fR, \fB\-\-roll\fR (degrés), \fB\-\-fov\fR (champ
+horizontal en degrés ; défaut selon la projection : 90, 180 ou 250),
+\fB\-\-keyframes\fR \fIFICHIER.json\fR (liste d'objets
+{"t": secondes, "yaw", "pitch", "roll", "fov"} ; les champs absents gardent la
+valeur de la vue de base).
 .TP
 .B equirect
-Exporte la vidéo 360° assemblée (\fB\-\-width\fR pour la largeur).
+Exporte la vidéo 360° assemblée avec les balises « vidéo sphérique » ;
+\fB\-\-width\fR donne la largeur (0 = deux fois la taille d'un objectif).
 .TP
 .B snapshot
-Enregistre une image JPEG de la vue.
+Enregistre une image de la vue à l'instant \fB\-\-t\fR : JPEG, ou PNG si le nom
+de sortie se termine par .png. Mêmes options de vue que \fBreframe\fR.
 .TP
 .B demo
-Génère un fichier .insv synthétique pour essayer le logiciel sans caméra.
+Génère un fichier .insv synthétique (deux objectifs fisheye de \fB\-\-lens\fR
+pixels, \fB\-\-seconds\fR secondes) pour essayer le logiciel sans caméra ;
+\fB\-\-motion\fR shake (tremblement), pan (rotation lente) ou static.
 .SH OPTIONS COMMUNES D'EXPORT
 .TP
 .BR \-o ", " \-\-output " " \fIFICHIER\fR
-Fichier de sortie (sinon : dossier de sortie par défaut).
+Fichier de sortie. Sans cette option : \fINOM\fR_\fIprojection\fR.mp4 (ou
+\fINOM\fR_360.mp4) dans le dossier de sortie, avec un suffixe _2, _3\&... pour ne
+jamais écraser un fichier existant.
+.TP
+.B \-\-output\-dir \fIDOSSIER\fR
+Dossier de sortie à la place de celui par défaut.
 .TP
 .BR \-\-start ", " \-\-end " " \fIS\fR
-Plage exportée, en secondes.
+Plage exportée, en secondes (0 = jusqu'à la fin).
 .TP
-.B \-\-speed \fIV\fR, \-\-fps \fIN\fR
-Vitesse (0,25 à 8) et cadence de sortie.
+.BR \-\-speed " " \fIV\fR ", " \-\-fps " " \fIN\fR
+Vitesse (1 = normale ; 2 = deux fois plus vite, le son suit) et cadence de sortie (0 = celle de la source, 240 au plus).
 .TP
-.B \-\-codec h264|h265, \-\-crf \fIN\fR, \-\-preset \fIP\fR, \-\-no\-audio
-Encodage.
+.BR \-\-codec " h264|h265, " \-\-crf " " \fIN\fR ", " \-\-preset " " \fIP\fR ", " \-\-no\-audio
+Encodage : codec, qualité (0 à 51, plus bas = meilleur), préréglage x264/x265
+(ultrafast à veryslow), sans piste audio.
 .TP
 .B \-\-stabilize off|smooth|lock|horizon
-Stabilisation (nécessite python3\-opencv) ; \fB\-\-strength\fR et \fB\-\-heading\fR
-règlent le lissage en secondes.
+Stabilisation par analyse d'image (la vidéo est analysée une fois, le résultat
+est mémorisé). \fBsmooth\fR lisse le mouvement, \fBlock\fR verrouille la
+direction du début de la plage, \fBhorizon\fR garde l'horizon à plat.
+.TP
+.BR \-\-strength " " \fIS\fR ", " \-\-heading " " \fIS\fR
+Lissage de la stabilisation et lissage du cap en mode horizon, en secondes
+(défauts 1 et 1,5).
 .TP
 .B \-\-orient \fICAP,INCLINAISON,ROULIS\fR
-Orientation (recentrage, mise à niveau de l'horizon), en degrés.
+Orientation de la caméra (recentrage, mise à niveau de l'horizon), en degrés.
 .TP
 .B \-\-calibration \fIFICHIER.json\fR
-Calibration des objectifs.
+Calibration des objectifs : champs \fBfov\fR (200), \fBblend\fR (10),
+\fBa_yaw\fR, \fBa_pitch\fR, \fBa_roll\fR, \fBb_yaw\fR, \fBb_pitch\fR,
+\fBb_roll\fR (degrés) et \fBswap_lenses\fR (true/false).
 .TP
-.B \-\-engine auto|cv|v360, \-\-dry\-run
-Moteur de rendu ; affichage des commandes sans exécution.
+.B \-\-dry\-run
+Affiche les commandes FFmpeg sans rien exécuter ni écrire.
+.SH CODE DE SORTIE
+0 : succès ; 1 : erreur (message « Erreur : \&... » sur la sortie d'erreur) ;
+2 : option invalide ; 130 : interrompu par Ctrl+C (la sortie partielle est supprimée).
 .SH ENVIRONNEMENT
 .TP
 .B X3STUDIO_HOME
-Dossier des caches et des réglages (défaut : ~/.cache/x3studio).
+Dossier des caches et des réglages (défaut : $XDG_CACHE_HOME/x3studio, soit
+~/.cache/x3studio).
 .TP
 .B X3STUDIO_OUTPUT
-Dossier de sortie des exports (défaut : ~/Vidéos/X3Studio).
+Dossier de sortie des exports (défaut : sous-dossier X3Studio du dossier Vidéos de l'utilisateur, ~/Videos/X3Studio à défaut).
+.TP
+.B RUST_LOG
+Niveau des journaux (défaut : warn).
 .SH FICHIERS
 .TP
 .I ~/.cache/x3studio/projects/
-Aperçu, analyse du mouvement et réglages de chaque vidéo.
+Aperçu, analyse du mouvement et réglages de chaque vidéo (supprimer un dossier
+réinitialise la vidéo correspondante).
+.SH EXEMPLES
+.nf
+x3studio demo essai.insv
+x3studio reframe VID_001.insv \-\-yaw 30 \-\-fov 90 \-\-stabilize horizon
+x3studio equirect VID_001.insv \-\-width 5760 \-\-codec h265
+x3studio snapshot VID_001.insv \-\-t 12.5 \-\-projection planet \-o planete.png
+.fi
 .SH VOIR AUSSI
 .BR ffmpeg (1),
 .I /usr/share/doc/x3studio/README.md

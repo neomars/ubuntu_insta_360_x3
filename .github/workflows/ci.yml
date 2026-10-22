@@ -1,0 +1,102 @@
+name: Tests
+
+# Vérifie chaque envoi et chaque pull request : format, clippy et tests du moteur Rust (Ubuntu 22.04 et 24.04, donc
+# FFmpeg 4.4 et 6.1), interface dans un vrai navigateur, puis construction, contrôle (lintian) et installation du
+# paquet .deb sur les deux versions d'Ubuntu.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Lecture seule : ces jobs n'ont rien à écrire dans le dépôt.
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg (médias de test, référence v360)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.os }}
+      - name: Format
+        run: cargo fmt --check
+      - name: Tests
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+      - name: Construire le binaire
+        run: cargo build --locked
+      - name: Tests de l'interface (Chromium sans écran)
+        working-directory: tests/ui
+        env:
+          X3STUDIO_BIN: ${{ github.workspace }}/target/debug/x3studio
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm test
+
+  package:
+    # Construit sur la plus ancienne cible : glibc 2.35, le .deb s'installe sur 22.04 comme sur 24.04.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils de contrôle
+        run: sudo apt-get update && sudo apt-get install -y lintian desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Construire le .deb
+        run: ./packaging/build-deb.sh
+      - name: Contrôle lintian
+        run: lintian --fail-on error,warning dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x3studio-deb
+          path: dist/*.deb
+          retention-days: 1
+          compression-level: 0 # un .deb est déjà compressé
+
+  package-test:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: x3studio-deb
+          path: dist
+      - name: Installer, essayer, désinstaller
+        run: ./packaging/smoke-test-deb.sh dist/*.deb

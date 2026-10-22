@@ -1,0 +1,81 @@
+[package]
+name = "x3studio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Traitement 100 % local des vidéos Insta360 X3 (360°, stabilisation, export)"
+license = "MIT"
+repository = "https://github.com/neomars/ubuntu_insta_360_x3"
+readme = "README.md"
+authors = ["martial limousin <martial.limousin@gmail.com>"]
+keywords = ["insta360", "360", "video", "stabilization", "ffmpeg"]
+categories = ["multimedia::video", "command-line-utilities"]
+
+[lib]
+name = "x3studio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "x3studio"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
+nalgebra = "0.35"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "fs", "io-util", "sync"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+ureq = { version = "3", features = ["json"] }
+
+# Paquet Debian (cargo-deb) : `cargo deb` ou ./packaging/build-deb.sh
+[package.metadata.deb]
+name = "x3studio"
+maintainer = "martial limousin <martial.limousin@gmail.com>"
+copyright = "2026, martial limousin <martial.limousin@gmail.com>"
+license-file = ["LICENSE", "0"]
+changelog = "packaging/changelog"
+section = "video"
+priority = "optional"
+depends = "$auto, ffmpeg"
+recommends = "xdg-utils"
+extended-description = """\
+X3 Studio Local ouvre les fichiers .insv de la caméra Insta360 X3, assemble les deux objectifs fisheye \
+en vidéo 360° et permet de les retravailler dans un navigateur : caméra virtuelle avec keyframes \
+(recadrage plat, fisheye, petite planète), stabilisation par analyse d'image (lissage, horizon à plat, \
+verrouillage), calibration des objectifs, vitesse, et export H.264/H.265 (vidéo plate ou 360° avec \
+balises « vidéo sphérique »).
+
+Tout est traité localement : FFmpeg (décodage et encodage) et le moteur Rust tournent sur votre machine, \
+le serveur de l'interface n'écoute que sur 127.0.0.1 et aucune donnée n'est envoyée sur Internet. \
+Une ligne de commande (probe, reframe, equirect, snapshot, demo) permet le traitement par lot."""
+assets = [
+    ["target/release/x3studio", "usr/bin/", "755"],
+    ["packaging/x3studio.desktop", "usr/share/applications/", "644"],
+    ["packaging/x3studio.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["packaging/x3studio.1", "usr/share/man/man1/", "644"],
+    ["packaging/x3studio.lintian-overrides", "usr/share/lintian/overrides/x3studio", "644"],
+    ["README.md", "usr/share/doc/x3studio/", "644"],
+]
+
+# Même réglage que le moteur de virtual-story.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# Les boucles pixel par pixel sont ~30x plus lentes sans optimisation : les tests restent rapides.
+[profile.dev]
+opt-level = 2
+[profile.test]
+opt-level = 2

@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
-# Construit le paquet .deb (Ubuntu 22.04 / 24.04) dans ./dist/
-#   sudo apt install build-essential debhelper dh-python pybuild-plugin-pyproject python3-all python3-setuptools fakeroot
+# Construit le paquet .deb (Ubuntu 22.04 / 24.04, amd64) dans ./dist/ avec cargo-deb.
+#   sudo apt install build-essential dpkg-dev          # + Rust : https://rustup.rs
 #   ./packaging/build-deb.sh
+# Construire sur Ubuntu 22.04 (glibc 2.35) donne un paquet qui s'installe aussi sur 24.04.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-for tool in dpkg-buildpackage dh dh_python3 fakeroot; do
-    command -v "$tool" >/dev/null || {
-        echo "Outil manquant : $tool" >&2
-        echo "  sudo apt install build-essential debhelper dh-python pybuild-plugin-pyproject python3-all python3-setuptools fakeroot" >&2
-        exit 1
-    }
-done
+command -v cargo >/dev/null || { echo "Rust (cargo) est requis : https://rustup.rs" >&2; exit 1; }
+command -v dpkg-shlibdeps >/dev/null || { echo "Outil manquant : sudo apt install dpkg-dev" >&2; exit 1; }
+command -v cargo-deb >/dev/null || cargo install cargo-deb --locked
 
-# l'horodatage de l'archive est fixé par le changelog (build reproductible)
-dpkg-buildpackage -us -uc -b
-mkdir -p dist
-version="$(dpkg-parsechangelog -S Version)"
-mv -f "../x3studio_${version}_all.deb" "../x3studio_${version}_"*.buildinfo "../x3studio_${version}_"*.changes dist/ 2>/dev/null || true
-dpkg-buildpackage -T clean >/dev/null 2>&1 || true
+rm -rf dist && mkdir -p dist
+cargo deb --locked --output dist/
 echo
-echo "Paquet : dist/x3studio_${version}_all.deb"
-echo "Installer : sudo apt install ./dist/x3studio_${version}_all.deb"
+ls -l dist/*.deb
+echo "Installer : sudo apt install ./$(ls dist/*.deb | head -1)"
