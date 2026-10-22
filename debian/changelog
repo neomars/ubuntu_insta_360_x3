@@ -1,0 +1,8 @@
+x3studio (0.1.0) noble; urgency=medium
+
+  * Première version : assemblage des .insv de l'Insta360 X3, recadrage
+    360° par keyframes, stabilisation par analyse d'image, export vidéo
+    plate ou 360°.
+  * Interface web locale (127.0.0.1) et ligne de commande.
+
+ -- martial limousin <martial.limousin@gmail.com>  Thu, 22 Oct 2026 12:00:00 +0000

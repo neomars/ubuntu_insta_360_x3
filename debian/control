@@ -1,0 +1,36 @@
+Source: x3studio
+Section: video
+Priority: optional
+Maintainer: martial limousin <martial.limousin@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-sequence-python3,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools,
+Standards-Version: 4.6.2
+Homepage: https://github.com/neomars/ubuntu_insta_360_x3
+Rules-Requires-Root: no
+
+Package: x3studio
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         ffmpeg,
+         python3-numpy,
+Recommends: python3-opencv,
+            xdg-utils,
+Description: traitement local des vidéos Insta360 X3 (360°, recadrage, stabilisation)
+ X3 Studio Local ouvre les fichiers .insv de la caméra Insta360 X3, assemble
+ les deux objectifs fisheye en vidéo 360° et permet de les retravailler dans
+ un navigateur : caméra virtuelle avec keyframes (recadrage plat, fisheye,
+ petite planète), stabilisation par analyse d'image (lissage, horizon à plat,
+ verrouillage), calibration des objectifs, vitesse, et export H.264/H.265
+ (vidéo plate ou 360° avec balises « vidéo sphérique »).
+ .
+ Tout est traité localement : FFmpeg et OpenCV tournent sur votre machine,
+ le serveur de l'interface n'écoute que sur 127.0.0.1 et aucune donnée n'est
+ envoyée sur Internet. Une ligne de commande (probe, reframe, equirect,
+ snapshot, demo) permet le traitement par lot.
+ .
+ OpenCV (python3-opencv) est recommandé : sans lui, la stabilisation est
+ indisponible et les exports à vue animée sont beaucoup plus lents.

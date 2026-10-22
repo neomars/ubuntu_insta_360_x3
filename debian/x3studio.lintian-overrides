@@ -1,0 +1,2 @@
+# index.html est la page de l'interface web locale, pas de la documentation.
+x3studio: package-contains-documentation-outside-usr-share-doc [usr/lib/python3/dist-packages/x3studio/web/index.html]

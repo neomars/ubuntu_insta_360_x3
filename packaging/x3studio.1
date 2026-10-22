@@ -1,0 +1,100 @@
+.TH X3STUDIO 1 "octobre 2026" "x3studio 0.1.0" "Commandes utilisateur"
+.SH NOM
+x3studio \- traitement local des vidéos Insta360 X3
+.SH SYNOPSIS
+.B x3studio
+[\fIFICHIER\fR]
+.br
+.B x3studio gui
+[\fB\-\-port\fR \fIN\fR] [\fB\-\-no\-browser\fR] [\fIFICHIER\fR]
+.br
+.B x3studio probe
+[\fB\-\-json\fR] \fIFICHIER\fR
+.br
+.B x3studio reframe
+\fIFICHIER\fR [\fB\-o\fR \fISORTIE\fR] [\fIOPTIONS\fR]
+.br
+.B x3studio equirect
+\fIFICHIER\fR [\fB\-o\fR \fISORTIE\fR] [\fIOPTIONS\fR]
+.br
+.B x3studio snapshot
+\fIFICHIER\fR [\fB\-o\fR \fISORTIE.jpg\fR] [\fB\-\-t\fR \fISECONDES\fR] [\fIOPTIONS\fR]
+.br
+.B x3studio demo
+\fISORTIE.insv\fR [\fB\-\-seconds\fR \fIN\fR] [\fB\-\-motion\fR shake|pan|static]
+.SH DESCRIPTION
+.B x3studio
+assemble et retravaille les fichiers .insv de la caméra Insta360 X3 : caméra
+virtuelle avec keyframes (recadrage plat, fisheye, petite planète),
+stabilisation par analyse d'image, calibration des objectifs, export H.264 ou
+H.265 en vidéo plate ou en vidéo 360° équirectangulaire.
+.PP
+Tout est traité localement. Sans argument (ou avec un nom de fichier),
+.B x3studio
+démarre l'interface web, servie uniquement sur 127.0.0.1, et l'ouvre dans le
+navigateur ; l'adresse complète (avec la clé de session) est affichée dans le
+terminal. Ctrl+C arrête le serveur.
+.SH COMMANDES
+.TP
+.B gui
+Lance l'interface web locale (commande par défaut).
+.TP
+.B probe
+Affiche l'organisation du fichier (deux flux fisheye, deux fichiers, fisheye
+côte à côte ou équirectangulaire), la taille, la cadence et la durée.
+.TP
+.B reframe
+Exporte une vidéo plate. Options : \fB\-\-projection\fR flat|fisheye|planet,
+\fB\-\-size\fR LxH, \fB\-\-yaw\fR, \fB\-\-pitch\fR, \fB\-\-roll\fR, \fB\-\-fov\fR,
+\fB\-\-keyframes\fR \fIFICHIER.json\fR.
+.TP
+.B equirect
+Exporte la vidéo 360° assemblée (\fB\-\-width\fR pour la largeur).
+.TP
+.B snapshot
+Enregistre une image JPEG de la vue.
+.TP
+.B demo
+Génère un fichier .insv synthétique pour essayer le logiciel sans caméra.
+.SH OPTIONS COMMUNES D'EXPORT
+.TP
+.BR \-o ", " \-\-output " " \fIFICHIER\fR
+Fichier de sortie (sinon : dossier de sortie par défaut).
+.TP
+.BR \-\-start ", " \-\-end " " \fIS\fR
+Plage exportée, en secondes.
+.TP
+.B \-\-speed \fIV\fR, \-\-fps \fIN\fR
+Vitesse (0,25 à 8) et cadence de sortie.
+.TP
+.B \-\-codec h264|h265, \-\-crf \fIN\fR, \-\-preset \fIP\fR, \-\-no\-audio
+Encodage.
+.TP
+.B \-\-stabilize off|smooth|lock|horizon
+Stabilisation (nécessite python3\-opencv) ; \fB\-\-strength\fR et \fB\-\-heading\fR
+règlent le lissage en secondes.
+.TP
+.B \-\-orient \fICAP,INCLINAISON,ROULIS\fR
+Orientation (recentrage, mise à niveau de l'horizon), en degrés.
+.TP
+.B \-\-calibration \fIFICHIER.json\fR
+Calibration des objectifs.
+.TP
+.B \-\-engine auto|cv|v360, \-\-dry\-run
+Moteur de rendu ; affichage des commandes sans exécution.
+.SH ENVIRONNEMENT
+.TP
+.B X3STUDIO_HOME
+Dossier des caches et des réglages (défaut : ~/.cache/x3studio).
+.TP
+.B X3STUDIO_OUTPUT
+Dossier de sortie des exports (défaut : ~/Vidéos/X3Studio).
+.SH FICHIERS
+.TP
+.I ~/.cache/x3studio/projects/
+Aperçu, analyse du mouvement et réglages de chaque vidéo.
+.SH VOIR AUSSI
+.BR ffmpeg (1),
+.I /usr/share/doc/x3studio/README.md
+.SH AUTEUR
+martial limousin.
