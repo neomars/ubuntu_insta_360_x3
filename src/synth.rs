@@ -8,14 +8,13 @@
 
 use crate::error::{export_err, Result};
 use crate::geometry::{rot_yaw, ypr_to_matrix, Mat3, Vec3};
+use crate::pipeline::Proc;
 use rayon::prelude::*;
-use std::collections::VecDeque;
 use std::f64::consts::PI;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
@@ -299,25 +298,11 @@ fn feed_ffmpeg(
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let mut child = Command::new("ffmpeg")
-        .args(["-hide_banner", "-nostdin", "-y", "-v", "error"])
-        .args(&args)
-        .arg(out)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| export_err(format!("Impossible de lancer ffmpeg : {e}")))?;
-    let errs: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let drain = child.stderr.take().map(|mut s| {
-        let errs = errs.clone();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = s.read_to_string(&mut text);
-            errs.lock().unwrap_or_else(|e| e.into_inner()).extend(text.lines().map(str::to_string));
-        })
-    });
-    let mut stdin = child.stdin.take();
+    let mut cmd: Vec<String> = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error"].map(String::from).to_vec();
+    cmd.extend(args);
+    cmd.push(out.to_string_lossy().into_owned());
+    let mut proc = Proc::spawn(&cmd, Stdio::piped(), Stdio::null())?;
+    let mut stdin = proc.take_stdin();
     let mut frame = vec![0u8; frame_bytes];
     let mut write_err = None;
     for i in 0..n {
@@ -331,18 +316,12 @@ fn feed_ffmpeg(
     }
     drop(stdin);
     if write_err.is_some() {
-        let _ = child.kill();
+        proc.kill();
     }
-    let status = child.wait()?;
-    if let Some(t) = drain {
-        let _ = t.join();
-    }
-    if write_err.is_some() || !status.success() {
+    let (ok, tail) = proc.wait();
+    if write_err.is_some() || !ok {
         let _ = std::fs::remove_file(out);
-        let errs = errs.lock().unwrap_or_else(|e| e.into_inner());
-        let tail: Vec<&str> = errs.iter().rev().take(10).map(String::as_str).collect();
-        let tail: Vec<&str> = tail.into_iter().rev().collect();
-        return Err(export_err(format!("ffmpeg a échoué : {}", tail.join("\n"))));
+        return Err(export_err(format!("ffmpeg a échoué : {tail}")));
     }
     Ok(())
 }

@@ -707,6 +707,14 @@ impl Proc {
         let _ = self.child.kill();
     }
 
+    pub(crate) fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
     /// Attend la fin du processus : (réussite, dernières lignes de stderr).
     pub(crate) fn wait(&mut self) -> (bool, String) {
         let ok = self.child.wait().map(|s| s.success()).unwrap_or(false);

@@ -11,18 +11,17 @@ use crate::calibration::Calibration;
 use crate::error::{export_err, Cancelled, Result};
 use crate::geometry::{matrix_from_quat, matrix_to_ypr, quat_from_matrix, rot_yaw, Mat3, Quat, Vec3, Ypr};
 use crate::media::Source;
-use crate::pipeline;
+use crate::pipeline::{self, Proc};
 use crate::render::{LensRenderer, Projection, SourceKind};
 use nalgebra::{Matrix4, SymmetricEigen};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -771,28 +770,8 @@ pub fn analyze_video(
         Some(r) => r.frame_bytes_in(),
         None => width * height,
     };
-    let (program, args) = dec.cmd.split_first().ok_or_else(|| export_err("Commande de décodage vide."))?;
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| export_err(format!("Impossible de lancer ffmpeg : {e}")))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let errs: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let drain = stderr.map(|mut s| {
-        let errs = errs.clone();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = s.read_to_string(&mut text);
-            let mut q = errs.lock().unwrap_or_else(|e| e.into_inner());
-            for l in text.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
-                q.push_back(l.to_string());
-            }
-        })
-    });
+    let mut proc = Proc::spawn(&dec.cmd, Stdio::null(), Stdio::piped())?;
+    let stdout = proc.take_stdout();
     let result = std::thread::scope(|scope| -> Result<Orientation> {
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(6);
         if let Some(mut out) = stdout {
@@ -818,17 +797,13 @@ pub fn analyze_video(
         let mut it = rx.into_iter();
         let res = analyze_frames(&mut it, width, height, src.fps, src.frames(), on_progress, cancel);
         drop(it); // débloque le lecteur si l'analyse s'est arrêtée avant la fin
-        let _ = child.kill();
-        let _ = child.wait();
+        proc.kill(); // le décodeur n'a plus rien à nous apporter (fin normale, annulation ou erreur)
         res
     });
-    if let Some(t) = drain {
-        let _ = t.join();
-    }
+    let (_, tail) = proc.wait();
     let mut o = result?;
     if o.n() < 2 {
-        let tail: Vec<String> = errs.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
-        return Err(export_err(format!("Analyse impossible : aucune image décodée.\n{}", tail.join("\n"))));
+        return Err(export_err(format!("Analyse impossible : aucune image décodée.\n{tail}")));
     }
     o.key = calibration_key(calib);
     Ok(o)
