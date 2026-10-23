@@ -161,6 +161,79 @@ pub fn camera_motion(n: usize, fps: f64, motion: Motion, seed: u64) -> Vec<Mat3>
         .collect()
 }
 
+/// Un sujet mobile : un disque à la texture irrégulière (cases de couleur tirées au hasard, orange ou cyan) qui se
+/// déplace dans le monde de `from` à `to` pendant toute la vidéo, avec une ondulation d'inclinaison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subject {
+    /// Rayon apparent (degrés).
+    pub radius: f64,
+    /// Cap et inclinaison (degrés, repère du monde) au début et à la fin de la vidéo.
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    /// Amplitude (degrés) de l'ondulation de l'inclinaison (une fois et demie sur la vidéo).
+    pub wobble: f64,
+    /// Le sujet disparaît de la scène à partir de cet instant (s) ; `f64::INFINITY` = jamais.
+    pub until: f64,
+}
+
+impl Subject {
+    /// Le sujet de `x3studio demo --subject` : il traverse la vue de face de gauche à droite.
+    pub fn demo() -> Subject {
+        Subject { radius: 6.0, from: (-30.0, 5.0), to: (60.0, 12.0), wobble: 4.0, until: f64::INFINITY }
+    }
+
+    /// Cap et inclinaison (degrés, repère du monde) à l'instant `t` d'une vidéo de `duration` secondes.
+    pub fn at(&self, t: f64, duration: f64) -> (f64, f64) {
+        let u = (t / duration.max(1e-9)).clamp(0.0, 1.0);
+        (
+            self.from.0 + (self.to.0 - self.from.0) * u,
+            self.from.1 + (self.to.1 - self.from.1) * u + self.wobble * (u * 2.0 * PI * 1.5).sin(),
+        )
+    }
+}
+
+/// Le sujet à un instant donné, prêt à peindre : centre (monde), repère local et cosinus du rayon.
+struct SubjectNow {
+    centre: [f32; 3],
+    local: [f32; 9],
+    cos_radius: f32,
+}
+
+impl SubjectNow {
+    fn new(sub: &Subject, t: f64, duration: f64) -> Option<SubjectNow> {
+        if t >= sub.until {
+            return None;
+        }
+        let (yaw, pitch) = sub.at(t, duration);
+        let m = ypr_to_matrix(yaw, pitch, 0.0);
+        Some(SubjectNow {
+            centre: [m[(0, 2)] as f32, m[(1, 2)] as f32, m[(2, 2)] as f32],
+            local: mat_f32(&m),
+            cos_radius: sub.radius.to_radians().cos() as f32,
+        })
+    }
+
+    /// Couleur du sujet dans la direction monde `w`, ou `None` hors du disque.
+    fn color(&self, w: [f32; 3]) -> Option<[u8; 3]> {
+        let c = &self.centre;
+        if w[0] * c[0] + w[1] * c[1] + w[2] * c[2] < self.cos_radius {
+            return None;
+        }
+        // coordonnées dans le repère du sujet (la transposée de sa matrice), projetées sur son plan
+        let m = &self.local;
+        let l = [
+            m[0] * w[0] + m[3] * w[1] + m[6] * w[2],
+            m[1] * w[0] + m[4] * w[1] + m[7] * w[2],
+            m[2] * w[0] + m[5] * w[1] + m[8] * w[2],
+        ];
+        let (a, b) = ((l[0] / l[2].max(0.1) * 40.0).floor() as i64, (l[1] / l[2].max(0.1) * 40.0).floor() as i64);
+        let h = (a.wrapping_mul(73_856_093) ^ b.wrapping_mul(19_349_663)).wrapping_mul(2_654_435_761) >> 7;
+        let shade = 0.45 + 0.55 * ((h & 0xFF) as f32 / 255.0);
+        let base = if (h >> 8) & 1 == 0 { [255.0, 140.0, 0.0] } else { [0.0, 200.0, 255.0] };
+        Some(base.map(|v| (v * shade) as u8))
+    }
+}
+
 /// Réglages d'une vidéo synthétique.
 #[derive(Debug, Clone)]
 pub struct SynthOptions {
@@ -178,6 +251,8 @@ pub struct SynthOptions {
     /// Demi-angle (degrés) d'une « perche » magenta peinte dans les deux objectifs autour du nadir de la caméra
     /// (axe -Y du repère de la caméra, fixe par rapport à elle) ; 0 = aucune.
     pub stick: f64,
+    /// Un sujet mobile peint dans le monde (suivi de sujet) ; `None` = aucun.
+    pub subject: Option<Subject>,
 }
 
 impl Default for SynthOptions {
@@ -192,6 +267,7 @@ impl Default for SynthOptions {
             with_audio: true,
             noise: 0.0,
             stick: 0.0,
+            subject: None,
         }
     }
 }
@@ -260,7 +336,14 @@ pub const STICK_COLOR: [u8; 3] = [255, 0, 255];
 /// Une image « deux objectifs côte à côte » (RGB 8 bits, `2*lens x lens`) vue par la caméra `cam`
 /// (caméra -> monde) ; l'objectif B regarde vers l'arrière. Avec une perche, les directions à moins de `stick_deg`
 /// degrés du nadir de la caméra (repère de la caméra, donc sans rapport avec le monde) sont peintes en [`STICK_COLOR`].
-fn render_pair(tex: &Texture, grid: &LensGrid, cam: &Mat3, stick_deg: Option<f64>, out: &mut [u8]) {
+fn render_pair(
+    tex: &Texture,
+    grid: &LensGrid,
+    cam: &Mat3,
+    stick_deg: Option<f64>,
+    subject: Option<&SubjectNow>,
+    out: &mut [u8],
+) {
     let l = grid.lens;
     let stick_cos = stick_deg.map(|d| d.to_radians().cos() as f32);
     let ms = [mat_f32(cam), mat_f32(&(cam * rot_yaw(PI)))];
@@ -280,7 +363,10 @@ fn render_pair(tex: &Texture, grid: &LensGrid, cam: &Mat3, stick_deg: Option<f64
                 let wx = m[0] * d[0] + m[1] * d[1] + m[2] * d[2];
                 let wy = m[3] * d[0] + m[4] * d[1] + m[5] * d[2];
                 let wz = m[6] * d[0] + m[7] * d[1] + m[8] * d[2];
-                px.copy_from_slice(&sample_texture(tex, wx, wy, wz));
+                match subject.and_then(|s| s.color([wx, wy, wz])) {
+                    Some(c) => px.copy_from_slice(&c),
+                    None => px.copy_from_slice(&sample_texture(tex, wx, wy, wz)),
+                }
             }
         }
     });
@@ -429,7 +515,8 @@ pub fn make_synthetic_insv(path: &Path, opt: &SynthOptions, texture: Option<&Tex
     );
     args.extend(encode_args(opt, n));
     feed_ffmpeg(args, path, n, 2 * lens * lens * 3, |i, frame| {
-        render_pair(tex, &grid, &mats[i], (opt.stick > 0.0).then_some(opt.stick), frame);
+        let subject = opt.subject.as_ref().and_then(|s| SubjectNow::new(s, i as f64 / opt.fps, opt.seconds));
+        render_pair(tex, &grid, &mats[i], (opt.stick > 0.0).then_some(opt.stick), subject.as_ref(), frame);
         add_noise(frame, opt.noise, opt.seed, i);
     })?;
     Ok(mats)
@@ -462,6 +549,24 @@ pub fn make_synthetic_equirect(
     args.extend(encode_args(opt, n));
     feed_ffmpeg(args, path, n, w * h * 3, |i, frame| {
         render_equirect(tex, &mats[i], w, h, frame);
+        if let Some(sub) = opt.subject.as_ref().and_then(|s| SubjectNow::new(s, i as f64 / opt.fps, opt.seconds)) {
+            let m = mat_f32(&mats[i]);
+            frame.par_chunks_mut(w * 3).enumerate().for_each(|(j, row)| {
+                let lat = (0.5 - (j as f32 + 0.5) / h as f32) * std::f32::consts::PI;
+                for (k, px) in row.chunks_mut(3).enumerate() {
+                    let lon = ((k as f32 + 0.5) / w as f32 - 0.5) * 2.0 * std::f32::consts::PI;
+                    let d = [lat.cos() * lon.sin(), lat.sin(), lat.cos() * lon.cos()];
+                    let wd = [
+                        m[0] * d[0] + m[1] * d[1] + m[2] * d[2],
+                        m[3] * d[0] + m[4] * d[1] + m[5] * d[2],
+                        m[6] * d[0] + m[7] * d[1] + m[8] * d[2],
+                    ];
+                    if let Some(c) = sub.color(wd) {
+                        px.copy_from_slice(&c);
+                    }
+                }
+            });
+        }
         // la perche est autour du nadir de la caméra, donc en bas de l'image : des lignes entières
         let stick_lat = -(PI / 2.0 - opt.stick.to_radians());
         for (j, row) in frame.chunks_mut(w * 3).enumerate().filter(|_| opt.stick > 0.0) {
@@ -543,7 +648,7 @@ mod tests {
         let t = make_texture(512, 3);
         let grid = lens_grid(64, 200.0);
         let mut out = vec![0u8; 2 * 64 * 64 * 3];
-        render_pair(&t, &grid, &ypr_to_matrix(0.0, 40.0, 0.0), None, &mut out);
+        render_pair(&t, &grid, &ypr_to_matrix(0.0, 40.0, 0.0), None, None, &mut out);
         let px = |x: usize, y: usize| [out[(y * 128 + x) * 3], out[(y * 128 + x) * 3 + 1], out[(y * 128 + x) * 3 + 2]];
         let a = px(32, 32);
         assert!(a[0] > 200 && a[1] < 60 && a[2] < 60, "A : rouge au centre {a:?}");
@@ -563,10 +668,10 @@ mod tests {
         let grid = lens_grid(128, 200.0);
         let magenta = |out: &[u8]| out.chunks(3).filter(|p| *p == STICK_COLOR).count();
         let mut plain = vec![0u8; 2 * 128 * 128 * 3];
-        render_pair(&t, &grid, &Mat3::identity(), None, &mut plain);
+        render_pair(&t, &grid, &Mat3::identity(), None, None, &mut plain);
         assert_eq!(magenta(&plain), 0);
         let mut a = vec![0u8; plain.len()];
-        render_pair(&t, &grid, &Mat3::identity(), Some(15.0), &mut a);
+        render_pair(&t, &grid, &Mat3::identity(), Some(15.0), None, &mut a);
         // les deux objectifs voient la perche au bord de leur image (le nadir est à 90° de leur axe)
         let n = magenta(&a);
         assert!(n > 300, "{n} pixels de perche");
@@ -577,7 +682,7 @@ mod tests {
         assert!(left > 100 && right > 100, "perche dans A ({left}) et dans B ({right})");
         // la perche est liée à la caméra : une caméra penchée en voit la même image, la scène change autour
         let mut b = vec![0u8; plain.len()];
-        render_pair(&t, &grid, &ypr_to_matrix(40.0, 25.0, 10.0), Some(15.0), &mut b);
+        render_pair(&t, &grid, &ypr_to_matrix(40.0, 25.0, 10.0), Some(15.0), None, &mut b);
         assert_eq!(magenta(&b), n);
         let mask = |img: &[u8]| img.chunks(3).map(|p| p == STICK_COLOR).collect::<Vec<_>>();
         assert_eq!(mask(&a), mask(&b));

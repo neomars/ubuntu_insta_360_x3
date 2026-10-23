@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, startApp, waitFor } from './helpers.mjs';
+import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, spriteFraction, startApp, waitFor } from './helpers.mjs';
 
 /** Attend la fin d'un enregistrement du cadrage (arrêt automatique en fin de plage). */
 const waitForRecEnd = (page) => waitFor(page, () => window.__x3.S.rec === null, { timeout: 15000 });
@@ -786,6 +786,63 @@ describe('interface X3 Studio Local', () => {
       assert.ok(two.length >= 2 && two.every((k) => k.ease === 'linear'), JSON.stringify(two));
       assert.ok(two[0].yaw > two[two.length - 1].yaw, 'la vue 2 a tourné vers la gauche');
       assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0, 'la vue 1 n\'est pas touchée');
+    });
+  });
+
+  it("suivi de sujet : on désigne le sujet dans l'aperçu, la vue le suit, keyframes enregistrés et annulables", async () => {
+    await withPage(async (page) => {
+      // une vidéo de démonstration avec un sujet mobile (disque orange et cyan) qui traverse la scène, caméra fixe
+      const clipFile = makeDemo(path.join(app.media, 'sujet.insv'), { seconds: 3, motion: 'static', subject: true });
+      await openAndWait(page, clipFile);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(1.0); S.dirty = true;
+      });
+      await settle(page); await sleep(400);
+      // à t = 1 s le sujet est à (cap 0°, inclinaison 7,3°) : au centre, un peu au-dessus de l'horizon
+      const box = await page.locator('#gl').boundingBox();
+      const aspect = box.height / box.width;
+      const uy = Math.tan(7.3 * Math.PI / 180) / (Math.tan(45 * Math.PI / 180) * aspect);
+      const cy = (1 - uy) / 2;
+      assert.ok(await spriteFraction(page, [0.47, cy - 0.03, 0.53, cy + 0.03]) > 0.4, 'le sujet est visible à l\'endroit attendu');
+      assert.ok(await spriteFraction(page, [0.0, 0.0, 0.2, 0.2]) < 0.3);
+      // désignation : le bouton passe en mode « cliquez », le clic lance le suivi
+      await page.click('#btn-track');
+      assert.equal(await page.getAttribute('#btn-track', 'aria-pressed'), 'true');
+      assert.match(await page.innerText('#track-status'), /Cliquez sur le sujet/);
+      await page.click('#btn-track');
+      assert.equal(await page.getAttribute('#btn-track', 'aria-pressed'), 'false', 'un second clic annule');
+      await page.click('#btn-track');
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height * cy);
+      await waitFor(page, () => window.__x3.S.tracking === null && window.__x3.S.st.keyframes.length > 0, { timeout: 90000 });
+      const kfs = await page.evaluate('window.__x3.S.st.keyframes');
+      assert.ok(kfs.length >= 3 && kfs.length <= 30, `${kfs.length} keyframes`);
+      assert.ok(kfs.every((k) => k.ease === 'linear' && Number.isFinite(k.yaw) && Number.isFinite(k.pitch) && k.fov === 90), JSON.stringify(kfs[0]));
+      assert.ok(kfs[0].t < 0.1 && kfs[kfs.length - 1].t > 2.8, 'la plage suivie va du début à la fin de la vidéo');
+      assert.ok(Math.abs(kfs[0].yaw - (-30)) < 4 && Math.abs(kfs[kfs.length - 1].yaw - 60) < 5, `cap de ${kfs[0].yaw} à ${kfs[kfs.length - 1].yaw}`);
+      assert.ok(kfs.every((k, i) => i === 0 || k.yaw > kfs[i - 1].yaw - 1), 'le sujet va de gauche à droite');
+      assert.match(await page.innerText('#track-status'), /Sujet suivi de 0:00\.\d à 0:0\d\.\d/);
+      assert.ok(await page.locator('#btn-rec-undo').isVisible());
+      // la vue suit le sujet : à tout instant le sujet est au centre de l'aperçu
+      for (const t of [0.2, 1.0, 1.9, 2.7]) {
+        await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, t);
+        await settle(page); await sleep(400);
+        assert.ok(await spriteFraction(page, [0.46, 0.43, 0.54, 0.57]) > 0.4, `à ${t} s, le sujet est au centre de l'aperçu`);
+      }
+      // et l'aperçu reste identique à l'export (interpolation linéaire des keyframes)
+      const { diff } = await previewVsExport(page);
+      assert.ok(diff < 0.045, `l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      // enregistré sur disque, annulable
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.keyframes.length, kfs.length);
+      await page.click('#btn-rec-undo');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0);
     });
   });
 });

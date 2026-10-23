@@ -100,6 +100,37 @@ export function gradeColorIsNeutral(g) {
   return ['brightness', 'contrast', 'saturation', 'gamma', 'warmth', 'tint'].every((k) => g[k] === GRADE_DEFAULT[k]);
 }
 
+// Direction (repère de la sortie) du point (ux, uy) de la vue, de -1 à 1 (uy vers le HAUT) : miroir de `outRay` du
+// shader de viewer.js et de render.rs::ray_at. `fov` en radians, `aspect` = hauteur / largeur, `dist` = distorsion.
+export function outputRay(projection, ux, uy, fov, aspect, dist = 0) {
+  const norm = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
+  if (projection === 'flat') {
+    if (dist < 1e-6) { const t = Math.tan(fov / 2); return norm([ux * t, uy * t * aspect, 1]); }
+    const lim = dist >= 1 ? Math.acos(-1 / dist) : Math.acos(-dist);
+    const half = Math.min(fov / 2, lim * 0.999);
+    const ge = (dist + 1) * Math.sin(half) / (dist + Math.cos(half));
+    const px = ux * ge, py = uy * aspect * ge, r = Math.hypot(px, py);
+    const rr = Math.sqrt((dist + 1) * (dist + 1) + r * r);
+    const th = Math.atan2(r, dist + 1) + Math.asin(Math.min(1, Math.max(-1, r * dist / rr)));
+    const s = r > 1e-6 ? Math.sin(th) / r : 1;
+    return [px * s, py * s, Math.cos(th)];
+  }
+  if (projection === 'fisheye') {
+    const ax = ux * fov / 2, ay = uy * aspect * fov / 2, th = Math.hypot(ax, ay);
+    const s = th > 1e-6 ? Math.sin(th) / th : 1;
+    return [ax * s, ay * s, Math.cos(th)];
+  }
+  const kx = Math.tan(fov / 4), ky = Math.tan(fov * aspect / 4);
+  const xs = ux * kx, ys = uy * ky, r = Math.hypot(xs, ys), th = 2 * Math.atan(r);
+  const s = r > 1e-6 ? Math.sin(th) / r : 2;
+  return [xs * s, ys * s, Math.cos(th)];
+}
+
+// Cap et inclinaison (degrés) d'une direction (x droite, y haut, z devant).
+export function dirToYawPitch(d) {
+  return [Math.atan2(d[0], d[2]) / D2R, Math.asin(Math.min(1, Math.max(-1, d[1]))) / D2R];
+}
+
 // Plusieurs perspectives : miroir de src/multi.rs (mêmes fractions, mêmes arrondis à l'entier pair).
 export const LAYOUT_TILES = { single: 1, side: 2, stack: 2, pip: 2, trio: 3, quad: 4 };
 const LAYOUT_FRACTIONS = {

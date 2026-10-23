@@ -752,6 +752,19 @@ pub struct AnalysisDecoder {
     pub frame_h: u32,
 }
 
+/// Comme [`analysis_decoder`], limité aux `count` images à partir de l'image `first` du proxy (visée au milieu de
+/// l'intervalle d'affichage de l'image précédente : la première image écrite est bien `first`).
+pub fn analysis_decoder_range(src: &Source, proxy: &Path, first: usize, count: usize) -> AnalysisDecoder {
+    let mut d = analysis_decoder(src, proxy);
+    if first > 0 {
+        let at = d.cmd.iter().position(|a| a == "-i").unwrap_or(1);
+        d.cmd.splice(at..at, ["-ss".to_string(), format!("{:.4}", (first as f64 - 0.5) / src.fps.max(1.0))]);
+    }
+    let at = d.cmd.iter().rposition(|a| a == "-f").unwrap_or(d.cmd.len());
+    d.cmd.splice(at..at, ["-frames:v".to_string(), count.to_string()]);
+    d
+}
+
 /// Taille d'un objectif dans les images d'analyse (le proxy est réduit à cette taille).
 const ANALYSIS_LENS_PX: u32 = 640;
 

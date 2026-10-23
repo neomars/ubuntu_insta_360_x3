@@ -90,7 +90,13 @@
       <p class="hint">Plus rapide que les keyframes un à un : <b>● Cadrage</b> (ou <kbd>R</kbd>) lance la lecture, orientez la vue à la souris (glisser, molette) en suivant l'action, puis arrêtez. Le tracé devient quelques keyframes qui remplacent ceux de la plage filmée.</p>
       <div class="field"><label for="rec-speed">Vitesse de lecture pendant l'enregistrement</label>
         <select id="rec-speed"><option value="0.25">×0,25</option><option value="0.5">×0,5</option><option value="1" selected>×1</option></select></div>
-      <div class="row"><button id="btn-rec-undo" class="btn small" hidden>↶ Annuler le dernier enregistrement</button></div>
+      <div class="row"><button id="btn-rec-undo" class="btn small" hidden>↶ Annuler le dernier enregistrement ou suivi</button></div>
+      <h3>Suivre un sujet</h3>
+      <p class="hint">Désignez un sujet dans l'aperçu : la vue le suit, avant et après cet instant, et les keyframes qui le gardent au centre remplacent ceux de la plage suivie. Réglez d'abord la stabilisation : le suivi en tient compte.</p>
+      <div class="field"><label for="t-size">Taille du sujet <small>environ ce qu'il occupe dans la vue</small></label><input id="t-size" type="range" min="3" max="40" step="1" value="12"><output></output></div>
+      <label class="check"><input type="checkbox" id="t-back" checked> Suivre aussi avant l'instant désigné</label>
+      <div class="row"><button id="btn-track" class="btn" aria-pressed="false" title="Puis cliquez sur le sujet dans l'aperçu">⌖ Désigner un sujet à suivre</button></div>
+      <div id="track-status" class="status-box" hidden></div>
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>
       <p id="kf-empty" class="hint">Aucun keyframe.</p>

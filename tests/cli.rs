@@ -5,7 +5,7 @@ use common::*;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use x3studio::synth::{Motion, SynthOptions};
+use x3studio::synth::{Motion, Subject, SynthOptions};
 
 struct Env {
     dir: tempfile::TempDir,
@@ -743,4 +743,99 @@ fn several_views_from_the_command_line() {
     assert!(text(&r.stderr).contains("Vues illisibles"), "{}", text(&r.stderr));
     let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "mosaique"]);
     assert_eq!(r.status.code(), Some(2));
+}
+
+#[test]
+fn track_writes_keyframes_that_reframe_can_use() {
+    let e = Env::new();
+    let subject = Subject { radius: 7.0, from: (15.0, 5.0), to: (85.0, 15.0), wobble: 4.0, until: f64::INFINITY };
+    let c = clip(
+        "cli-subject",
+        SynthOptions {
+            seconds: 2.0,
+            fps: 30.0,
+            lens: 480,
+            motion: Motion::Static,
+            subject: Some(subject.clone()),
+            ..Default::default()
+        },
+    );
+    let (yaw, pitch) = subject.at(0.5, 2.0);
+    let out = e.out("suivi.json");
+    let r = e.x3(&[
+        "track",
+        p(&c.path),
+        "-o",
+        p(&out),
+        "--t",
+        "0.5",
+        "--yaw",
+        &yaw.to_string(),
+        "--pitch",
+        &pitch.to_string(),
+        "--size",
+        "12",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    assert_eq!(text(&r.stdout).trim(), out.to_str().unwrap());
+    assert!(text(&r.stderr).contains("Sujet suivi de 0.00 s"), "{}", text(&r.stderr));
+    let kfs: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert!(kfs.len() >= 2 && kfs.len() < 25, "{} keyframes", kfs.len());
+    assert!(kfs.iter().all(|k| k["ease"] == "linear"));
+    assert_eq!(kfs[0]["t"], 0.0);
+    assert!((kfs[0]["yaw"].as_f64().unwrap() - 15.0).abs() < 3.0, "{}", kfs[0]);
+    assert!(kfs.last().unwrap()["yaw"].as_f64().unwrap() > 75.0);
+    // sans -o : le JSON sur la sortie standard
+    let r = e.x3(&[
+        "track",
+        p(&c.path),
+        "--t",
+        "0.5",
+        "--yaw",
+        &yaw.to_string(),
+        "--pitch",
+        &pitch.to_string(),
+        "--no-backward",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let on_stdout: Vec<Value> = serde_json::from_str(&text(&r.stdout)).unwrap();
+    assert!(
+        (on_stdout[0]["t"].as_f64().unwrap() - 0.5).abs() < 0.04,
+        "pas de recul : la plage commence à l'instant désigné"
+    );
+    // le fichier sert tel quel à l'export recadré
+    let video = e.out("suivi.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&video),
+        "--keyframes",
+        p(&out),
+        "--size",
+        "320x180",
+        "--fov",
+        "60",
+        "--preset",
+        "ultrafast",
+        "--no-audio",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frames = read_frames(&video, 320, 180, "rgb24", None, None);
+    assert_eq!(frames.len(), 60);
+    // erreurs de paramètres
+    for (args, word) in [
+        (vec!["--yaw", "10", "--pitch", "120"], "inclinaison"),
+        (vec!["--yaw", "10", "--pitch", "0", "--size", "nan"], "Valeur invalide"),
+        (vec!["--yaw", "10", "--pitch", "0", "--end", "inf"], "Valeur invalide"),
+        (vec!["--yaw", "nan", "--pitch", "0"], "Valeur invalide"),
+    ] {
+        let mut a = vec!["track", p(&c.path), "--t", "0.5"];
+        a.extend_from_slice(&args);
+        let r = e.x3(&a);
+        assert_eq!(r.status.code(), Some(1), "{args:?}");
+        assert!(text(&r.stderr).contains(word), "{args:?} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["track", p(&c.path), "--yaw", "10", "--pitch", "0"]);
+    assert_eq!(r.status.code(), Some(2), "--t est obligatoire");
 }

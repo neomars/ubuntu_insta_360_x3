@@ -1,5 +1,5 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, LAYOUT_TILES, defaultTileView, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, layoutRects, mul3, multiWithDefaults, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, LAYOUT_TILES, defaultTileView, dirToYawPitch, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, layoutRects, mul3, multiWithDefaults, outputRay, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
 import { replaceKeyframes, simplifySamples } from './recorder.js';
 
@@ -33,6 +33,8 @@ const S = {
   proj: null, st: null, t: 0, dur: 0, fps: 30,
   tile: 0,                   // vue en cours de modification (0 = la vue du projet, 1… = les vues supplémentaires)
   listAt: 0,                 // dernier rafraîchissement de la liste des vues (ms)
+  pick: false,               // le prochain clic dans l'aperçu désigne le sujet à suivre
+  tracking: null,            // suivi en cours : { job, tile }
   rec: null,                 // enregistrement du cadrage en cours : { tile, view, samples, rate }
   recUndo: null,             // keyframes remplacés par le dernier enregistrement : { tile, keyframes }
   override: null,            // vue modifiée à la main, pas encore enregistrée
@@ -233,7 +235,7 @@ async function openProject(path) {
 
 function adoptProject(p) {
   S.proj = p; S.st = p.state; S.dur = p.source.duration; S.fps = p.source.fps; S.override = null;
-  S.tile = 0; S.selKf = -1; S.rec = null; S.recUndo = null;
+  S.tile = 0; S.selKf = -1; S.rec = null; S.recUndo = null; S.pick = false; S.tracking = null;
   S.st.multi = multiWithDefaults(S.st.multi);
   S.videoReady = false;
   const src = p.source, [w, h] = src.lens_size;
@@ -400,6 +402,7 @@ $('#btn-kf-clear').addEventListener('click', () => {
 // remplacent ceux de la plage enregistrée, pour la vue sélectionnée.
 function startRecording() {
   if (!S.videoReady || !S.st) return;
+  if (S.pick) setPick(false);
   const tr = S.st.trim;
   if (tr.end > 0 && video.currentTime >= tr.end - 0.05) video.currentTime = tr.start;
   const rate = parseFloat($('#rec-speed').value) || 1;
@@ -453,6 +456,71 @@ function updateRecUI() {
 $('#btn-rec').addEventListener('click', () => (S.rec ? stopRecording() : startRecording()));
 $('#btn-rec-undo').addEventListener('click', undoRecording);
 
+// ---------------------------------------------------------------- suivi de sujet
+const trackStatus = (text, warn = false) => {
+  const box = $('#track-status');
+  box.hidden = !text; box.textContent = text || '';
+  box.className = 'status-box' + (warn ? ' warn' : '');
+};
+function setPick(on) {
+  S.pick = on && !!S.st && !S.tracking && !S.rec;
+  $('#btn-track').setAttribute('aria-pressed', S.pick ? 'true' : 'false');
+  $('#btn-track').classList.toggle('rec', S.pick);
+  $('#btn-track').textContent = S.pick ? '✕ Annuler la désignation' : '⌖ Désigner un sujet à suivre';
+  canvas.style.cursor = S.pick ? 'crosshair' : '';
+  if (S.pick) { video.pause(); trackStatus('Cliquez sur le sujet dans l\'aperçu.'); } else if (!S.tracking) trackStatus('');
+}
+// Direction (repère de la vue) du point cliqué : on remonte la projection de la vue sous le pointeur.
+function pointedDirection(e) {
+  const r = canvas.getBoundingClientRect();
+  const rect = layoutRects(S.st.multi.layout, r.width, r.height, S.st.multi.gap)[S.tile];
+  const x = e.clientX - r.left - rect.x, y = e.clientY - r.top - rect.y;
+  const v = currentView(S.t), d = tileData();
+  const ray = outputRay(d.projection, 2 * x / rect.w - 1, 1 - 2 * y / rect.h, v.fov * Math.PI / 180, rect.h / rect.w, d.projection === 'flat' ? v.distortion || 0 : 0);
+  const m = yprToMatrix(v.yaw, v.pitch, v.roll);
+  return dirToYawPitch([0, 1, 2].map((i) => m[i * 3] * ray[0] + m[i * 3 + 1] * ray[1] + m[i * 3 + 2] * ray[2]));
+}
+async function pickSubject(e) {
+  const [yaw, pitch] = pointedDirection(e);
+  setPick(false);
+  const tr = S.st.trim;
+  trackStatus('Suivi en cours…');
+  try {
+    await flushSave();
+    const job = await api('POST', `/api/project/${S.proj.id}/track`, {
+      t: S.t, yaw, pitch, size: +$('#t-size').value, backward: $('#t-back').checked,
+      start: tr.start, end: tr.end > 0 ? tr.end : S.dur,
+    });
+    S.tracking = { job: job.id, tile: S.tile };
+    S.jobs.push({ id: job.id, state: job.state });   // une tâche très courte doit quand même être vue passer à « terminé »
+    refreshJobs();
+  } catch (err) { trackStatus(''); toast(err.message, true); }
+}
+// Le suivi est terminé : ses keyframes (cap et inclinaison) remplacent ceux de la plage suivie ; le champ, le roulis et la
+// distorsion gardent leurs valeurs d'avant.
+async function applyTrack(job) {
+  const tracking = S.tracking;
+  S.tracking = null;
+  try {
+    const r = await api('GET', `/api/project/${S.proj.id}/track`);
+    if (r.job !== job.id || !r.keyframes || r.keyframes.length < 2) throw new Error('Le suivi n\'a rien donné.');
+    const d = tileData(tracking.tile), old = d.keyframes;
+    const fresh = r.keyframes.map((k) => ({ ...interpolateView(old, k.t, d.view), ...k }));
+    S.recUndo = { tile: tracking.tile, keyframes: old.map((k) => ({ ...k })) };
+    d.keyframes = replaceKeyframes(old, fresh, fresh[0].t, fresh[fresh.length - 1].t);
+    if (tracking.tile === 0) scheduleSave('keyframes'); else scheduleSave('multi');
+    S.override = null; S.selKf = -1;
+    const lost = [r.track.lost_before != null && `avant ${fmtTime(r.track.lost_before)}`, r.track.lost_after != null && `à partir de ${fmtTime(r.track.lost_after)}`].filter(Boolean);
+    const msg = `Sujet suivi de ${fmtTime(fresh[0].t)} à ${fmtTime(fresh[fresh.length - 1].t)} : ${fresh.length} keyframes.`;
+    trackStatus(lost.length ? `${msg} Sujet perdu ${lost.join(' et ')}.` : msg, lost.length > 0);
+    toast(msg);
+    renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+  } catch (err) { trackStatus(''); toast(err.message, true); }
+}
+$('#btn-track').addEventListener('click', () => setPick(!S.pick));
+$('#t-size').addEventListener('input', (e) => { e.target.parentElement.querySelector('output').textContent = `${e.target.value}°`; });
+$('#t-size').parentElement.querySelector('output').textContent = `${$('#t-size').value}°`;
+
 // ---------------------------------------------------------------- interaction avec l'image
 const canvas = $('#gl');
 let drag = null;
@@ -469,6 +537,7 @@ function tileAtPointer(e) {
 canvas.addEventListener('pointerdown', (e) => {
   if (!S.st) return;
   selectTile(tileAtPointer(e));
+  if (S.pick) { e.preventDefault(); pickSubject(e); return; }
   canvas.setPointerCapture(e.pointerId);
   drag = { x: e.clientX, y: e.clientY };
   canvas.classList.add('dragging');
@@ -847,6 +916,7 @@ async function refreshJobs() {
       const meta = document.createElement('div'); meta.className = 'meta err'; meta.textContent = j.error; li.appendChild(meta);
     }
     list.appendChild(li);
+    if (S.tracking && j.id === S.tracking.job && j.state === 'running') trackStatus(`Suivi en cours… ${Math.round(j.progress * 100)} %`);
     if (prev.get(j.id) && prev.get(j.id) !== j.state) onJobChange(j);
   }
   clearTimeout(jobTimer);
@@ -854,7 +924,11 @@ async function refreshJobs() {
 }
 async function onJobChange(j) {
   if (j.state === 'done' && j.kind === 'export') toast('Export terminé : ' + j.output);
-  if (j.state === 'error') toast(`${j.title} : échec`, true);
+  if (j.state === 'error') toast(j.kind === 'track' && j.error ? j.error : `${j.title} : échec`, true);
+  if (S.tracking && j.id === S.tracking.job) {
+    if (j.state === 'done') applyTrack(j);
+    else if (j.state === 'error' || j.state === 'cancelled') { S.tracking = null; trackStatus(j.state === 'error' ? j.error : 'Suivi annulé.', true); }
+  }
   if (!S.proj || j.project_id !== S.proj.id) return;
   if (j.state === 'done' && (j.kind === 'proxy' || j.kind === 'analyze')) {
     const p = await api('GET', `/api/project/${S.proj.id}`);
@@ -907,6 +981,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowRight') { e.preventDefault(); seek(S.t + (e.shiftKey ? 1 : 1 / S.fps)); }
   else if (e.key === 'k' || e.key === 'K') addKeyframe();
   else if (e.key === 'r' || e.key === 'R') { if (S.rec) stopRecording(); else startRecording(); }
+  else if (e.key === 'Escape' && S.pick) setPick(false);
   else if (e.key === 'i' || e.key === 'I') setTrim('start');
   else if (e.key === 'o' || e.key === 'O') setTrim('end');
 });

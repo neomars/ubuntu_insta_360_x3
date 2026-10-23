@@ -51,6 +51,8 @@ enum Cmd {
     Equirect(EquirectArgs),
     /// Enregistre une image (JPEG ou PNG) de la vue
     Snapshot(SnapshotArgs),
+    /// Suit un sujet et écrit les keyframes qui le gardent au centre (à passer à `reframe --keyframes`)
+    Track(TrackArgs),
     /// Génère un .insv synthétique pour essayer le logiciel sans caméra
     Demo(DemoArgs),
 }
@@ -238,6 +240,51 @@ struct SnapshotArgs {
 }
 
 #[derive(Args, Debug)]
+struct TrackArgs {
+    /// Fichier .insv (ou vidéo 360° équirectangulaire)
+    input: PathBuf,
+    /// Fichier JSON des keyframes (défaut : sortie standard)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Instant (s) où le sujet est désigné
+    #[arg(long)]
+    t: f64,
+    /// Cap du sujet (°) à cet instant, dans le repère de la vue (celui de `reframe --yaw`)
+    #[arg(long, allow_hyphen_values = true)]
+    yaw: f64,
+    /// Inclinaison du sujet (°) à cet instant
+    #[arg(long, allow_hyphen_values = true)]
+    pitch: f64,
+    /// Taille apparente du sujet (°) : de 3 à 40
+    #[arg(long, default_value_t = 12.0)]
+    size: f64,
+    /// Début de la plage suivie (s)
+    #[arg(long, default_value_t = 0.0)]
+    start: f64,
+    /// Fin de la plage suivie (s, 0 = jusqu'à la fin)
+    #[arg(long, default_value_t = 0.0)]
+    end: f64,
+    /// Ne suit pas vers l'arrière (avant l'instant désigné)
+    #[arg(long)]
+    no_backward: bool,
+    /// Stabilisation à prendre en compte : la même que pour l'export qui utilisera les keyframes
+    #[arg(long, default_value = "off", value_parser = ["off", "smooth", "lock", "horizon"])]
+    stabilize: String,
+    /// Lissage de la stabilisation (s)
+    #[arg(long, default_value_t = 1.0)]
+    strength: f64,
+    /// Lissage du cap en mode horizon (s)
+    #[arg(long, default_value_t = 1.5)]
+    heading: f64,
+    /// Orientation : cap,inclinaison,roulis (°), comme pour l'export
+    #[arg(long, value_parser = parse_triplet)]
+    orient: Option<Ypr>,
+    /// JSON de calibration des objectifs
+    #[arg(long)]
+    calibration: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct DemoArgs {
     /// Fichier .insv à créer
     output: PathBuf,
@@ -250,6 +297,9 @@ struct DemoArgs {
     /// Mouvement de la caméra
     #[arg(long, default_value = "shake", value_parser = ["shake", "pan", "static"])]
     motion: String,
+    /// Ajoute un sujet mobile (un disque orange et cyan qui traverse la scène) pour essayer le suivi de sujet
+    #[arg(long)]
+    subject: bool,
 }
 
 fn parse_size(txt: &str) -> std::result::Result<(u32, u32), String> {
@@ -557,16 +607,94 @@ fn cmd_snapshot(a: SnapshotArgs, cancel: &AtomicBool) -> Result<()> {
     run_export(&app, &p, &s, &a.export, Some(a.t), cancel)
 }
 
+fn cmd_track(a: TrackArgs, cancel: &AtomicBool) -> Result<()> {
+    check_finite(&[
+        ("--t", a.t),
+        ("--yaw", a.yaw),
+        ("--pitch", a.pitch),
+        ("--size", a.size),
+        ("--start", a.start),
+        ("--end", a.end),
+        ("--strength", a.strength),
+        ("--heading", a.heading),
+    ])?;
+    let mode: StabMode = a.stabilize.parse()?;
+    let app = App::new(None, None)?;
+    let p = app.open_project(&a.input, false)?;
+    if let Some(file) = &a.calibration {
+        let c = Calibration::load(file)
+            .map_err(|e| export_err(format!("Calibration illisible ({}) : {e}", file.display())))?;
+        p.update_state(&json!({ "calibration": c }))?;
+    }
+    let progress = Progress::new();
+    app.prepare_sync(&p, mode != StabMode::Off, &|label, f| progress.report(label, f), cancel)?;
+    let stab = (mode != StabMode::Off || a.orient.is_some()).then(|| {
+        p.stab_matrices(&StabOverride {
+            mode: Some(mode),
+            strength: Some(a.strength),
+            heading_strength: Some(a.heading),
+            orientation: Some(a.orient.unwrap_or_default()),
+            start: Some(a.start),
+        })
+    });
+    let duration = p.src.duration;
+    let params = crate::tracker::TrackParams {
+        t0: a.t.clamp(0.0, duration),
+        yaw: a.yaw,
+        pitch: a.pitch,
+        size: a.size.clamp(crate::tracker::SIZE_RANGE.0, crate::tracker::SIZE_RANGE.1),
+        start: a.start.max(0.0),
+        end: if a.end > a.t { a.end.min(duration) } else { duration },
+        backward: !a.no_backward,
+    };
+    if !(-90.0..=90.0).contains(&params.pitch) {
+        return Err(export_err("L'inclinaison du sujet doit être comprise entre -90 et 90°."));
+    }
+    let track = crate::tracker::track_video(
+        &p.src,
+        &p.calibration(),
+        &p.proxy_path(),
+        stab.flatten().as_deref(),
+        &params,
+        &|f| progress.report("suivi", f),
+        cancel,
+    )?;
+    let keyframes = crate::tracker::samples_to_keyframes(&track.samples, crate::tracker::KEYFRAME_TOLERANCE);
+    let (first, last) = (track.samples.first().map_or(0.0, |s| s.t), track.samples.last().map_or(0.0, |s| s.t));
+    eprintln!(
+        "Sujet suivi de {first:.2} s à {last:.2} s : {} keyframes{}.",
+        keyframes.len(),
+        match (track.lost_before, track.lost_after) {
+            (None, None) => String::new(),
+            (b, f) => format!(
+                " (sujet perdu{}{})",
+                b.map_or(String::new(), |t| format!(" avant {t:.2} s")),
+                f.map_or(String::new(), |t| format!(" à partir de {t:.2} s"))
+            ),
+        }
+    );
+    let text = serde_json::to_string_pretty(&keyframes)?;
+    match &a.output {
+        Some(file) => {
+            std::fs::write(file, text + "\n")?;
+            println!("{}", file.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 fn cmd_demo(a: DemoArgs) -> Result<()> {
     let motion: Motion = a.motion.parse()?;
     eprintln!("Génération de {} ({:.0} s, mouvement « {} »)…", a.output.display(), a.seconds, a.motion);
-    let opt = SynthOptions { seconds: a.seconds, lens: a.lens, motion, ..Default::default() };
+    let subject = a.subject.then(crate::synth::Subject::demo);
+    let opt = SynthOptions { seconds: a.seconds, lens: a.lens, motion, subject, ..Default::default() };
     make_synthetic_insv(&a.output, &opt, None)?;
     println!("{}", a.output.display());
     Ok(())
 }
 
-const SUBCOMMANDS: [&str; 6] = ["gui", "probe", "reframe", "equirect", "snapshot", "demo"];
+const SUBCOMMANDS: [&str; 7] = ["gui", "probe", "reframe", "equirect", "snapshot", "track", "demo"];
 
 /// `x3studio` seul ou `x3studio fichier.insv` ouvre l'interface web.
 fn with_default_gui(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -601,6 +729,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Cmd::Reframe(a) => cmd_reframe(a, &cancel),
         Cmd::Equirect(a) => cmd_equirect(a, &cancel),
         Cmd::Snapshot(a) => cmd_snapshot(a, &cancel),
+        Cmd::Track(a) => cmd_track(a, &cancel),
         Cmd::Demo(a) => cmd_demo(a),
     };
     match result {
