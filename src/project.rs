@@ -272,9 +272,9 @@ impl Project {
         }
     }
 
-    /// `{available, ready, frames, stale, median_inliers, weak_frames}`.
+    /// `{ready, frames, stale, median_inliers, weak_frames}`.
     pub fn analysis_info(&self) -> Value {
-        let mut info = json!({ "available": true, "ready": false });
+        let mut info = json!({ "ready": false });
         if let Some(o) = self.orientation() {
             let inl: Vec<u32> = if o.n() > 1 { o.inliers[1..].to_vec() } else { o.inliers.clone() };
             let mut sorted = inl.clone();
@@ -542,7 +542,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let p = open(home.path());
         assert!(!p.has_proxy() && p.orientation().is_none());
-        assert_eq!(p.analysis_info(), json!({"available": true, "ready": false}));
+        assert_eq!(p.analysis_info(), json!({"ready": false}));
         std::fs::write(p.proxy_path(), vec![0u8; 1000]).unwrap();
         assert!(!p.has_proxy(), "trop petit pour être un aperçu");
         std::fs::write(p.proxy_path(), vec![0u8; 1001]).unwrap();
@@ -556,10 +556,7 @@ mod tests {
         };
         o.save(&p.orient_path()).unwrap();
         let info = p.analysis_info();
-        assert_eq!(
-            info,
-            json!({"available": true, "ready": true, "frames": 5, "stale": false, "median_inliers": 57, "weak_frames": 2})
-        );
+        assert_eq!(info, json!({"ready": true, "frames": 5, "stale": false, "median_inliers": 57, "weak_frames": 2}));
         // la calibration change : l'analyse est périmée
         p.update_state(&json!({"calibration": {"fov": 190}})).unwrap();
         assert_eq!(p.analysis_info()["stale"], true);

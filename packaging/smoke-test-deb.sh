@@ -13,7 +13,7 @@ step() { echo "==> $*"; }
 fail() { echo "ÉCHEC : $*" >&2; exit 1; }
 
 step "installation (apt tire ffmpeg)"
-$SUDO apt-get install -y -o APT::Sandbox::User=root "$deb"
+$SUDO apt-get install -y --no-install-recommends -o APT::Sandbox::User=root "$deb"
 
 step "fichiers installés"
 for f in /usr/bin/x3studio /usr/share/applications/x3studio.desktop /usr/share/icons/hicolor/scalable/apps/x3studio.svg; do

@@ -8,7 +8,7 @@ et **encoder**.
 
 | Module | Rôle |
 |---|---|
-| `media` | Sonde (`ffprobe`) : organisation du fichier (deux flux, deux fichiers `_00_`/`_10_`, fisheye côte à côte, équirectangulaire), cadence, durée, audio, signature de fin des `.insv` |
+| `media` | Sonde (`ffprobe`) : organisation du fichier (deux flux, deux fichiers `_00_`/`_10_`, fisheye côte à côte, équirectangulaire), cadence, durée, audio, signature de fin des `.insv`. Un flux 2:1 est « fisheye côte à côte » s'il porte une marque Insta360 (`.insv`, `.lrv`, signature) ou si une image montre deux cercles sur fond noir ; sinon c'est un panorama |
 | `geometry` | Rotations, quaternions, interpolation de keyframes (smoothstep, cap par le plus court chemin) |
 | `calibration` | Modèle des deux objectifs (champ, rotations fines, fondu, inversion) |
 | `render` | Rendu direct objectifs → vue (`flat`, `fisheye`, `planet`, `equirect`), parallèle (`rayon`) |
@@ -66,6 +66,10 @@ ffmpeg (décodeur)  ──I420 brut──▶  rendu (rayon)  ──I420 brut─�
 * Les processus sont lancés sans shell, leur stderr est lu en continu (sinon ils se bloquent), ils sont tués et
   attendus dans tous les cas de sortie (annulation, erreur, panique) : jamais d'orphelin. Une sortie
   partielle est supprimée.
+* Instant → image : l'export prend l'image dont l'horodatage est la plus proche de `t`. L'interface s'y place en
+  visant le **milieu** de l'intervalle d'affichage de cette image (`seek` dans `web/app.js`) : le navigateur affiche
+  la dernière image dont l'horodatage est ≤ `currentTime`, et un horodatage WebM (arrondi à 1 ms, décalé de +7 ms
+  par FFmpeg 4.4) ne tombe jamais exactement sur `k / cadence`. À l'arrêt, l'instant courant est `k / cadence`.
 * Les noms de sortie sont **réservés** (fichier créé en exclusivité) au lancement de l'export : deux exports en
   file ne visent jamais le même fichier.
 

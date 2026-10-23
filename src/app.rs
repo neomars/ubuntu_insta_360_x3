@@ -15,6 +15,12 @@ use std::sync::{Arc, Mutex};
 /// Largeur d'un objectif dans le proxy d'aperçu (px).
 const PROXY_LENS_PX: u32 = 960;
 
+/// Taille d'un objectif dans l'aperçu : 960 px au plus, sans agrandir une source plus petite (le `.lrv` de l'X3
+/// n'a que 512 px par objectif).
+fn proxy_lens_px(src: &crate::media::Source) -> u32 {
+    PROXY_LENS_PX.min(src.lens_size.1 & !1).max(16)
+}
+
 pub struct App {
     pub home: PathBuf,
     pub output_dir: PathBuf,
@@ -114,7 +120,7 @@ impl App {
             Box::new(move |job| {
                 job.set_message("Préparation de l'aperçu");
                 let part = pc.proxy_path().with_extension("part");
-                let cmd = pipeline::build_proxy_cmd(&pc.src, &part, PROXY_LENS_PX);
+                let cmd = pipeline::build_proxy_cmd(&pc.src, &part, proxy_lens_px(&pc.src));
                 let res = pipeline::run_ffmpeg(&cmd, pc.src.duration, &|f| job.set_progress(f), &job.cancel);
                 match res {
                     Ok(()) => std::fs::rename(&part, pc.proxy_path())?,
@@ -174,7 +180,7 @@ impl App {
     ) -> Result<()> {
         if !p.has_proxy() {
             let part = p.proxy_path().with_extension("part");
-            let cmd = pipeline::build_proxy_cmd(&p.src, &part, PROXY_LENS_PX);
+            let cmd = pipeline::build_proxy_cmd(&p.src, &part, proxy_lens_px(&p.src));
             let res = pipeline::run_ffmpeg(&cmd, p.src.duration, &|f| on_progress("aperçu", f), cancel);
             match res {
                 Ok(()) => std::fs::rename(&part, p.proxy_path())?,
@@ -307,8 +313,7 @@ impl App {
         result
     }
 
-    /// `{version, ffmpeg, opencv, output_dir, home, encoders, cpus}` ; `opencv` reste présent pour
-    /// l'interface et vaut toujours vrai : le moteur de rendu et de stabilisation est intégré.
+    /// `{version, ffmpeg, output_dir, home, encoders, cpus}`.
     pub fn info(&self) -> serde_json::Value {
         let ffmpeg = Command::new("ffmpeg")
             .arg("-version")
@@ -319,7 +324,6 @@ impl App {
         serde_json::json!({
             "version": crate::VERSION,
             "ffmpeg": ffmpeg,
-            "opencv": true,
             "output_dir": self.output_dir.to_string_lossy(),
             "home": std::env::var("HOME").unwrap_or_default(),
             "encoders": self.encoders,
@@ -330,7 +334,35 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::slug;
+    use super::{proxy_lens_px, slug};
+    use crate::media::{Layout, Source};
+
+    fn source_of(lens: u32) -> Source {
+        Source {
+            path: "/x/a.insv".into(),
+            layout: Layout::SbsFisheye,
+            lens_files: vec![],
+            lens_streams: vec![],
+            lens_size: (lens, lens),
+            fps: 30.0,
+            duration: 1.0,
+            codec: "h264".into(),
+            has_audio: false,
+            audio_file: None,
+            has_trailer: false,
+            size_bytes: 0,
+            camera: String::new(),
+            notes: vec![],
+        }
+    }
+
+    #[test]
+    fn the_preview_is_never_larger_than_the_source() {
+        assert_eq!(proxy_lens_px(&source_of(2880)), 960, "un .insv de l'X3 est réduit à 960 px par objectif");
+        assert_eq!(proxy_lens_px(&source_of(512)), 512, "le .lrv n'est pas agrandi");
+        assert_eq!(proxy_lens_px(&source_of(481)), 480, "taille paire");
+        assert_eq!(proxy_lens_px(&source_of(8)), 16, "plancher");
+    }
 
     #[test]
     fn slug_cleans_names() {

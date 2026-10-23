@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use x3studio::app::App;
 use x3studio::error::is_user_error;
 use x3studio::jobs::JobState;
+use x3studio::media::Layout;
 use x3studio::project::Project;
 use x3studio::synth::{Motion, SynthOptions};
 
@@ -269,4 +270,20 @@ fn cancelling_the_preview_removes_the_partial_file() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(!p.has_proxy() && !p.proxy_path().with_extension("part").exists());
     assert!(f.app.jobs.active(&p.id, "analyze").is_none(), "pas d'analyse sans aperçu");
+}
+
+#[test]
+fn a_low_resolution_lrv_gets_a_preview_of_its_own_size() {
+    let f = fixture();
+    let c = clip(
+        "app-lrv",
+        SynthOptions { seconds: 1.0, fps: 30.0, lens: 96, motion: Motion::Shake, ..Default::default() },
+    );
+    let lrv = derive(&c, "lrv", "LRV_20261021_004354_11_001.lrv", &HSTACK);
+    let p = f.app.open_project(&lrv, false).unwrap();
+    assert_eq!(p.src.layout, Layout::SbsFisheye);
+    f.app.prepare_sync(&p, true, &|_, _| {}, &AtomicBool::new(false)).unwrap();
+    let info = probe_video(&p.proxy_path());
+    assert_eq!((info.w, info.h), (192, 96), "l'aperçu n'est pas agrandi à 1920×960");
+    assert!(p.orientation().is_some(), "l'analyse du mouvement part de l'aperçu");
 }

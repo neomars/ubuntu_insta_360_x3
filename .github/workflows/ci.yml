@@ -1,7 +1,7 @@
 name: Tests
 
 # Vérifie chaque envoi et chaque pull request : format, clippy et tests du moteur Rust (Ubuntu 22.04 et 24.04, donc
-# FFmpeg 4.4 et 6.1), interface dans un vrai navigateur, puis construction, contrôle (lintian) et installation du
+# FFmpeg 4.4 et 6.1), interface dans un vrai navigateur (sur les deux aussi), puis construction, contrôle (lintian) et installation du
 # paquet .deb sur les deux versions d'Ubuntu.
 
 on:
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ffmpeg (médias de test, référence v360)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -38,15 +38,23 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  # L'interface sur les deux versions d'Ubuntu : l'aperçu VP9 produit par FFmpeg 4.4 (22.04) comme par 6.1 (24.04)
+  # doit se lire dans le navigateur.
   ui:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ui-${{ matrix.os }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22

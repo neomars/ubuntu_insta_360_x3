@@ -3,7 +3,7 @@ mod common;
 
 use common::*;
 use x3studio::error::is_user_error;
-use x3studio::media::{probe_source, Layout, INSTA360_TRAILER_MAGIC};
+use x3studio::media::{looks_like_dual_fisheye, probe_source, Layout, INSTA360_TRAILER_MAGIC};
 use x3studio::spherical::{has_spherical_v1, inject_spherical_v1};
 use x3studio::synth::{Motion, SynthOptions};
 
@@ -47,6 +47,32 @@ fn the_extension_does_not_decide_the_layout() {
     std::os::unix::fs::symlink(&mp4, &link).unwrap();
     let s2 = probe_source(&link).unwrap();
     assert_eq!(s2.path, std::fs::canonicalize(&mp4).unwrap().to_str().unwrap(), "chemin canonique");
+}
+
+#[test]
+fn a_two_to_one_file_is_side_by_side_fisheye_or_a_panorama_according_to_its_frames() {
+    let c = x3_clip();
+    // le .lrv de la caméra : reconnu à son nom
+    let lrv = derive(&c, "lrv", "LRV_20261021_004354_11_001.lrv", &HSTACK);
+    let s = probe_source(&lrv).unwrap();
+    assert_eq!((s.layout, s.lens_size, s.camera.as_str()), (Layout::SbsFisheye, (96, 96), "Insta360"));
+    assert!(s.notes.iter().any(|n| n.contains("basse résolution")), "{:?}", s.notes);
+    // le même flux sans nom ni signature : reconnu à ses images (deux cercles sur fond noir)
+    let plain = derive(&c, "lrv", "copie.mp4", &HSTACK);
+    let s = probe_source(&plain).unwrap();
+    assert_eq!((s.layout, s.lens_size, s.camera.as_str()), (Layout::SbsFisheye, (96, 96), ""));
+    assert!(looks_like_dual_fisheye(&plain, s.duration));
+    // un panorama équirectangulaire 2:1 qui remplit le cadre reste un panorama
+    let pano = equirect_clip(
+        "media-pano",
+        512,
+        SynthOptions { seconds: 1.0, fps: 30.0, motion: Motion::Static, with_audio: false, ..Default::default() },
+    );
+    let s = probe_source(&pano.path).unwrap();
+    assert_eq!((s.layout, s.lens_size), (Layout::Equirect, (512, 256)));
+    assert!(!looks_like_dual_fisheye(&pano.path, s.duration));
+    // l'aperçu et l'export de la copie sans marque se comportent comme ceux d'un fichier de la caméra
+    assert_eq!(probe_video(&plain).frames, 30);
 }
 
 #[test]
