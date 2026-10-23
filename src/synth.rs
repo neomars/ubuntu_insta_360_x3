@@ -173,6 +173,8 @@ pub struct SynthOptions {
     pub motion: Motion,
     pub seed: u64,
     pub with_audio: bool,
+    /// Bruit additif (écart-type en niveaux sur 255), différent à chaque image : pour tester la réduction du bruit.
+    pub noise: f64,
 }
 
 impl Default for SynthOptions {
@@ -185,6 +187,7 @@ impl Default for SynthOptions {
             motion: Motion::Shake,
             seed: 3,
             with_audio: true,
+            noise: 0.0,
         }
     }
 }
@@ -265,6 +268,21 @@ fn render_pair(tex: &Texture, grid: &LensGrid, cam: &Mat3, out: &mut [u8]) {
                 let wz = m[6] * d[0] + m[7] * d[1] + m[8] * d[2];
                 px.copy_from_slice(&sample_texture(tex, wx, wy, wz));
             }
+        }
+    });
+}
+
+/// Bruit additif reproductible, à peu près gaussien (somme de quatre tirages uniformes), d'écart-type `sigma` niveaux ;
+/// il dépend de la graine, du numéro d'image et de la position : deux images successives n'ont pas le même.
+fn add_noise(frame: &mut [u8], sigma: f64, seed: u64, index: usize) {
+    if sigma <= 0.0 {
+        return;
+    }
+    frame.par_chunks_mut(3 * 1024).enumerate().for_each(|(c, chunk)| {
+        let mut rng = Rng::new(seed ^ ((index as u64) << 24) ^ (c as u64).wrapping_mul(0x9E37_79B9));
+        for p in chunk.iter_mut() {
+            let g = (rng.unit() + rng.unit() + rng.unit() + rng.unit() - 2.0) * 3.0f64.sqrt();
+            *p = (f64::from(*p) + g * sigma).round().clamp(0.0, 255.0) as u8;
         }
     });
 }
@@ -358,6 +376,8 @@ fn encode_args(opt: &SynthOptions, n: usize) -> Vec<String> {
         ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-frames:v"].map(String::from),
     );
     a.extend([n.to_string(), "-r".into(), format!("{}", opt.fps), "-f".into(), "mp4".into()]);
+    // comme la caméra : BT.709, plage limitée
+    a.extend(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"].map(String::from));
     a
 }
 
@@ -383,7 +403,9 @@ pub fn make_synthetic_insv(path: &Path, opt: &SynthOptions, texture: Option<&Tex
     args.extend(
         [
             "-filter_complex",
-            "[0:v]split[s1][s2];[s1]crop=iw/2:ih:0:0,format=yuv420p[a];[s2]crop=iw/2:ih:iw/2:0,format=yuv420p[b]",
+            "[0:v]split[s1][s2];\
+             [s1]crop=iw/2:ih:0:0,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[a];\
+             [s2]crop=iw/2:ih:iw/2:0,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[b]",
             "-map",
             "[a]",
             "-map",
@@ -392,7 +414,10 @@ pub fn make_synthetic_insv(path: &Path, opt: &SynthOptions, texture: Option<&Tex
         .map(String::from),
     );
     args.extend(encode_args(opt, n));
-    feed_ffmpeg(args, path, n, 2 * lens * lens * 3, |i, frame| render_pair(tex, &grid, &mats[i], frame))?;
+    feed_ffmpeg(args, path, n, 2 * lens * lens * 3, |i, frame| {
+        render_pair(tex, &grid, &mats[i], frame);
+        add_noise(frame, opt.noise, opt.seed, i);
+    })?;
     Ok(mats)
 }
 
@@ -419,7 +444,7 @@ pub fn make_synthetic_equirect(
     };
     let (w, h) = (width as usize, width as usize / 2);
     let mut args = raw_input_args(&format!("{w}x{h}"), opt);
-    args.extend(["-map".to_string(), "0:v".into()]);
+    args.extend(["-vf", "scale=out_color_matrix=bt709:out_range=tv", "-map", "0:v"].map(String::from));
     args.extend(encode_args(opt, n));
     feed_ffmpeg(args, path, n, w * h * 3, |i, frame| render_equirect(tex, &mats[i], w, h, frame))?;
     Ok(mats)

@@ -505,6 +505,52 @@ pub fn near(c: [f64; 3], target: [f64; 3], tol: f64) -> bool {
     c.iter().zip(&target).all(|(a, b)| (a - b).abs() <= tol)
 }
 
+/// Réglages de couleur de référence, écrits à part du moteur : (luminosité, contraste, saturation, tons moyens,
+/// chaleur, teinte). Calcul en RVB flottant dans l'espace Y'CbCr BT.709 (les valeurs de la spécification de
+/// `src/grade.rs`, réécrites ici pour que le test ne dépende pas du code qu'il vérifie).
+pub type GradeRef = (f64, f64, f64, f64, f64, f64);
+
+pub fn grade_rgb(img: &[u8], g: GradeRef) -> Vec<u8> {
+    let (brightness, contrast, saturation, gamma, warmth, tint) = g;
+    let (shift_cb, shift_cr) = (-0.08 * warmth + 0.051 * tint, 0.07 * warmth + 0.06 * tint);
+    img.chunks(3)
+        .flat_map(|px| {
+            let [r, gr, b] = [px[0], px[1], px[2]].map(|v| f64::from(v) / 255.0);
+            let y = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+            let (cb, cr) = ((b - y) / 1.8556, (r - y) / 1.5748);
+            let y = ((y.clamp(0.0, 1.0).powf(1.0 / gamma) - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0);
+            let cb = (cb * saturation + shift_cb).clamp(-0.5, 0.5);
+            let cr = (cr * saturation + shift_cr).clamp(-0.5, 0.5);
+            [y + 1.5748 * cr, y - 0.187324 * cb - 0.468124 * cr, y + 1.8556 * cb]
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        })
+        .collect()
+}
+
+/// Énergie des contours : écart moyen entre pixels voisins (horizontalement et verticalement) du canal vert.
+pub fn edge_energy(img: &[u8], w: usize, h: usize) -> f64 {
+    let g = |x: usize, y: usize| f64::from(img[(y * w + x) * 3 + 1]);
+    let mut sum = 0.0;
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            sum += (g(x + 1, y) - g(x, y)).abs() + (g(x, y + 1) - g(x, y)).abs();
+        }
+    }
+    sum / ((w - 1) * (h - 1)) as f64
+}
+
+/// Écart-type temporel moyen, par pixel et par canal, d'une suite d'images d'une scène immobile : le bruit.
+pub fn temporal_noise(frames: &[Vec<u8>]) -> f64 {
+    let n = frames.len() as f64;
+    let len = frames[0].len();
+    let mut total = 0.0;
+    for i in 0..len {
+        let mean = frames.iter().map(|f| f64::from(f[i])).sum::<f64>() / n;
+        total += (frames.iter().map(|f| (f64::from(f[i]) - mean).powi(2)).sum::<f64>() / n).sqrt();
+    }
+    total / len as f64
+}
+
 /// Processus dont la ligne de commande contient `needle` (Linux : /proc).
 pub fn processes_mentioning(needle: &str) -> Vec<String> {
     let mut found = vec![];

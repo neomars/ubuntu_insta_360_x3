@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use x3studio::calibration::Calibration;
 use x3studio::error::{is_cancelled, is_user_error};
 use x3studio::geometry::{ypr_to_matrix, Mat3, Ypr};
+use x3studio::grade::Grade;
 use x3studio::media::{probe_source, Layout, Source};
 use x3studio::pipeline::{build_plan, build_snapshot_plan, run_plan, ExportSettings};
 use x3studio::synth::{render_equirect, Motion, SynthOptions};
@@ -517,4 +518,105 @@ fn user_orientation_matrix_is_applied_in_the_plan() {
     let want = ypr_to_matrix(20.0, -5.0, 3.0).transpose() * ypr_to_matrix(10.0, 4.0, 1.0);
     assert!((plan.mats[0] - want).abs().max() < 1e-12);
     assert_eq!(plan.fovs[0], 70.0);
+}
+
+/// Réglages de couleur : l'export concorde avec la formule de référence appliquée à l'export sans réglage.
+#[test]
+fn color_grade_follows_the_reference_formula() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    let view = (25.0, -10.0, 0.0, 90.0);
+    let frame_of = |name: &str, grade: Grade| {
+        let out = dir.path().join(name);
+        export(&c, &Calibration::default(), &ExportSettings { grade, ..flat_settings(view) }, &out);
+        read_frames(&out, 640, 360, "rgb24", None, Some(8)).swap_remove(4)
+    };
+    let plain = frame_of("plain.mp4", Grade::default());
+    for (name, g, reference) in [
+        ("bright", Grade { brightness: 0.15, ..Default::default() }, (0.15, 1.0, 1.0, 1.0, 0.0, 0.0)),
+        ("contrast", Grade { contrast: 1.6, gamma: 1.3, ..Default::default() }, (0.0, 1.6, 1.0, 1.3, 0.0, 0.0)),
+        ("grey", Grade { saturation: 0.0, ..Default::default() }, (0.0, 1.0, 0.0, 1.0, 0.0, 0.0)),
+        ("vivid", Grade { saturation: 1.7, ..Default::default() }, (0.0, 1.0, 1.7, 1.0, 0.0, 0.0)),
+        ("warm", Grade { warmth: 0.8, tint: -0.4, ..Default::default() }, (0.0, 1.0, 1.0, 1.0, 0.8, -0.4)),
+        (
+            "all",
+            Grade {
+                brightness: -0.1,
+                contrast: 1.2,
+                saturation: 1.3,
+                gamma: 0.8,
+                warmth: -0.5,
+                tint: 0.3,
+                ..Default::default()
+            },
+            (-0.1, 1.2, 1.3, 0.8, -0.5, 0.3),
+        ),
+    ] {
+        let got = frame_of(&format!("{name}.mp4"), g);
+        let err = mean_abs_diff(&got, &grade_rgb(&plain, reference));
+        let off = mean_abs_diff(&got, &plain);
+        assert!(err < 3.5, "{name} : écart {err:.2} avec la formule de référence");
+        assert!(
+            off > 3.0 * err,
+            "{name} : l'image a peu changé (écart {off:.2} contre {err:.2} : test non discriminant)"
+        );
+    }
+    // aucun réglage = aucune opération : l'image est identique à celle de l'export sans réglage
+    let again = frame_of("neutral.mp4", Grade { contrast: 1.0, ..Default::default() });
+    assert!(mean_abs_diff(&again, &plain) < 0.5);
+    // la capture d'image reçoit le même traitement, en JPEG comme en PNG
+    let src = probe_source(&c.path).unwrap();
+    for (ext, tol) in [("png", 3.0), ("jpg", 4.0)] {
+        let s = ExportSettings {
+            grade: Grade { brightness: 0.15, saturation: 1.5, ..Default::default() },
+            width: 640,
+            height: 360,
+            view: json!({"yaw": view.0, "pitch": view.1, "fov": view.3}),
+            ..Default::default()
+        };
+        let out = dir.path().join(format!("snap.{ext}"));
+        run_plan(
+            build_snapshot_plan(&src, &Calibration::default(), &s, 0.5, &out, None).unwrap(),
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let (img, ..) = read_image(&out);
+        let err = mean_abs_diff(&img, &grade_rgb(&plain, (0.15, 1.0, 1.5, 1.0, 0.0, 0.0)));
+        assert!(err < tol, "capture .{ext} : écart {err:.2} avec la formule de référence");
+    }
+}
+
+/// Netteté et réduction du bruit passent par les filtres de FFmpeg : leur effet se mesure sur l'image.
+#[test]
+fn sharpen_adds_contrast_on_edges_and_denoise_removes_noise() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = static_clip();
+    let edges = |grade: Grade| {
+        let out = dir.path().join(format!("e{}.mp4", grade.sharpen));
+        export(&c, &Calibration::default(), &ExportSettings { grade, ..flat_settings((25.0, -10.0, 0.0, 90.0)) }, &out);
+        let f = read_frames(&out, 640, 360, "rgb24", None, Some(8)).swap_remove(4);
+        edge_energy(&f, 640, 360)
+    };
+    let (soft, sharp) = (edges(Grade::default()), edges(Grade { sharpen: 1.0, ..Default::default() }));
+    assert!(sharp > 1.08 * soft, "contours : {soft:.2} -> {sharp:.2}");
+
+    let noisy = clip(
+        "noisy",
+        SynthOptions { seconds: 1.5, fps: 30.0, lens: 480, motion: Motion::Static, noise: 10.0, ..Default::default() },
+    );
+    let grain = |denoise: f64| {
+        let out = dir.path().join(format!("n{denoise}.mp4"));
+        let s = ExportSettings {
+            grade: Grade { denoise, ..Default::default() },
+            crf: 8,
+            ..flat_settings((25.0, -10.0, 0.0, 90.0))
+        };
+        export(&noisy, &Calibration::default(), &s, &out);
+        let frames = read_frames(&out, 640, 360, "rgb24", Some(0.3), Some(24));
+        temporal_noise(&frames)
+    };
+    let (before, after) = (grain(0.0), grain(1.0));
+    assert!(before > 3.0, "la vidéo de test est bruitée ({before:.2})");
+    assert!(after < 0.75 * before, "bruit temporel : {before:.2} -> {after:.2}");
 }

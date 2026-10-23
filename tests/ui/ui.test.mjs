@@ -398,4 +398,75 @@ describe('interface X3 Studio Local', () => {
       }
     });
   });
+
+  it("réglages d'image : curseurs, enregistrement, aperçu et export identiques", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('image'));
+      await page.click('.tab[data-tab=image]');
+      const set = (id, value) => page.evaluate(([id, value]) => {
+        const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true }));
+      }, [id, String(value)]);
+      const grade = () => page.evaluate('window.__x3.S.st.grade');
+      const neutral = { brightness: 0, contrast: 1, saturation: 1, gamma: 1, warmth: 0, tint: 0, sharpen: 0, denoise: 0 };
+      assert.deepEqual(await grade(), neutral);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 30, pitch: 10, roll: 0, fov: 90, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); X.seek(0.8); S.dirty = true;
+      });
+      await settle(page);
+      await sleep(400);
+      const plain = await canvasThumb(page);
+      const parity = async (label) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      await parity('sans réglage');
+      for (const [label, values] of [
+        ['luminosité et contraste', { brightness: 0.18, contrast: 1.4 }],
+        ['saturation forte', { saturation: 1.9, gamma: 1.3 }],
+        ['noir et blanc', { saturation: 0, contrast: 1.2 }],
+        ['chaleur et teinte', { warmth: 0.7, tint: -0.5, brightness: -0.1, gamma: 0.8 }],
+        ['tout à la fois', { brightness: 0.08, contrast: 1.25, saturation: 1.5, gamma: 1.15, warmth: -0.6, tint: 0.4 }],
+      ]) {
+        for (const k of Object.keys(neutral)) await set('g-' + k, neutral[k]);
+        for (const [k, v] of Object.entries(values)) await set('g-' + k, v);
+        const g = await grade();
+        for (const [k, v] of Object.entries({ ...neutral, ...values })) assert.ok(Math.abs(g[k] - v) < 1e-9, `${label} : ${k} = ${g[k]}`);
+        assert.match(await page.innerText('#pane-image .field:nth-of-type(1) output'), /^[+-]?\d\.\d\d$/);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const moved = meanAbsDiff(plain, await canvasThumb(page));
+        assert.ok(moved > 6, `${label} : l'aperçu doit changer (écart ${moved.toFixed(1)})`);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(label);
+      }
+      // enregistré sur disque, rouvert tel quel
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.ok(Math.abs(saved.grade.warmth + 0.6) < 1e-9 && Math.abs(saved.grade.contrast - 1.25) < 1e-9, JSON.stringify(saved.grade));
+      // le serveur refuse une valeur hors bornes et garde les réglages précédents
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { grade: { contrast: 9 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /contraste/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // netteté et bruit sont enregistrés (effet à l'export seulement)
+      await set('g-sharpen', 0.4); await set('g-denoise', 0.3);
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const saved2 = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.ok(Math.abs(saved2.grade.sharpen - 0.4) < 1e-9 && Math.abs(saved2.grade.denoise - 0.3) < 1e-9);
+      // réinitialiser rend l'image d'origine
+      await page.click('#btn-grade-reset');
+      assert.deepEqual(await grade(), neutral);
+      await settle(page); await sleep(300);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.ok(meanAbsDiff(plain, await canvasThumb(page)) < 1.5, "après réinitialisation, l'image est celle d'origine");
+      await parity('après réinitialisation');
+    });
+  });
 });

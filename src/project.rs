@@ -7,6 +7,7 @@
 use crate::calibration::Calibration;
 use crate::error::{export_err, Result};
 use crate::geometry::{Keyframe, Mat3, View, Ypr};
+use crate::grade::Grade;
 use crate::media::{probe_source, Layout, Source};
 use crate::pipeline::{default_fov, ExportSettings};
 use crate::stabilize::{self, calibration_key, Orientation, StabMode};
@@ -51,6 +52,8 @@ pub struct State {
     pub keyframes: Vec<Keyframe>,
     pub stabilization: StabParams,
     pub orientation: Ypr,
+    /// Réglages d'image (luminosité, contraste, couleurs, netteté…).
+    pub grade: Grade,
     /// Réglages d'export mémorisés (libres).
     pub export: Value,
 }
@@ -65,14 +68,15 @@ impl Default for State {
             keyframes: vec![],
             stabilization: StabParams::default(),
             orientation: Ypr::default(),
+            grade: Grade::default(),
             export: json!({}),
         }
     }
 }
 
 /// Clés de premier niveau acceptées par `update_state`.
-const STATE_KEYS: [&str; 8] =
-    ["calibration", "trim", "projection", "view", "keyframes", "stabilization", "orientation", "export"];
+const STATE_KEYS: [&str; 9] =
+    ["calibration", "trim", "projection", "view", "keyframes", "stabilization", "orientation", "grade", "export"];
 
 /// Surcharges des réglages de stabilisation (aperçu, CLI) : `None` = valeur de l'état du projet.
 #[derive(Debug, Clone, Default)]
@@ -221,6 +225,7 @@ impl Project {
         let mut next: State =
             serde_json::from_value(merged).map_err(|e| export_err(format!("Réglages invalides : {e}")))?;
         next.keyframes.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+        next.grade.validate()?;
         let file = self.state_file();
         let tmp = file.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&next)?)?;
@@ -330,6 +335,7 @@ impl Project {
         d.insert("keyframes".into(), serde_json::to_value(&s.keyframes)?);
         d.insert("view".into(), serde_json::to_value(s.view)?);
         d.insert("orientation".into(), serde_json::to_value(s.orientation)?);
+        d.insert("grade".into(), serde_json::to_value(s.grade)?);
         d.insert("start".into(), json!(s.trim.start));
         d.insert("end".into(), json!(s.trim.end));
         for extra in [Some(&s.export), overrides].into_iter().flatten() {
@@ -517,6 +523,8 @@ mod tests {
             json!({"view": {"fov": "large"}}),
             json!({"stabilization": {"mode": "zoom"}}),
             json!({"projection": 3}),
+            json!({"grade": {"contrast": 9}}),
+            json!({"grade": {"saturation": "vive"}}),
         ] {
             let e = p.update_state(&bad).unwrap_err();
             assert!(crate::error::is_user_error(&e), "{bad} → {e}");

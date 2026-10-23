@@ -1,5 +1,5 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, IDENTITY, MAX_DISTORTION, fmtTime, fovRange, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, MAX_DISTORTION, fmtTime, fovRange, gradeWithDefaults, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
@@ -205,6 +205,8 @@ function adoptProject(p) {
   $('#file-info').textContent = `${p.name} — ${dims} · ${src.fps.toFixed(2).replace(/\.?0+$/, '')} fps · ${fmtTime(src.duration)}${src.has_trailer ? ' · métadonnées Insta360' : ''}`;
   $('#file-info').title = src.path;
   viewer && viewer.setCalibration(S.st.calibration);
+  S.st.grade = gradeWithDefaults(S.st.grade);
+  viewer && viewer.setGrade(S.st.grade);
   setProjectionUI();
   bindStateToControls();
   renderKeyframes();
@@ -443,6 +445,7 @@ function bindStateToControls() {
     if (!el) continue;
     if (el.type === 'checkbox') el.checked = !!c[k]; else setOut('#c-' + k, c[k], '°');
   }
+  for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
   updateAnalysisStatus();
 }
 function setOut(sel, v, unit) {
@@ -496,6 +499,32 @@ function updateAnalysisStatus() {
   if (quality === 'faible') box.classList.add('warn');
   box.textContent = `Analyse prête : ${a.frames} images, ${a.median_inliers} points suivis en moyenne (fiabilité ${quality}).` + (a.weak_frames ? ` ${a.weak_frames} images peu fiables.` : '');
 }
+
+// ---------------------------------------------------------------- réglages d'image
+const GRADE_FMT = {
+  brightness: (v) => (v > 0 ? '+' : '') + v.toFixed(2), warmth: (v) => (v > 0 ? '+' : '') + v.toFixed(2),
+  tint: (v) => (v > 0 ? '+' : '') + v.toFixed(2),
+  contrast: (v) => '×' + v.toFixed(2), saturation: (v) => '×' + v.toFixed(2), gamma: (v) => v.toFixed(2),
+  sharpen: (v) => v.toFixed(2), denoise: (v) => v.toFixed(2),
+};
+function setGradeControl(k) {
+  const el = $('#g-' + k), v = S.st.grade[k];
+  if (document.activeElement !== el) el.value = v;
+  el.parentElement.querySelector('output').textContent = GRADE_FMT[k](+v);
+}
+for (const k of Object.keys(GRADE_DEFAULT)) {
+  $('#g-' + k).addEventListener('input', (e) => {
+    if (!S.st) return;
+    S.st.grade[k] = parseFloat(e.target.value);
+    setGradeControl(k); viewer && viewer.setGrade(S.st.grade); S.dirty = true; scheduleSave('grade');
+  });
+}
+$('#btn-grade-reset').addEventListener('click', () => {
+  if (!S.st) return;
+  S.st.grade = { ...GRADE_DEFAULT };
+  for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
+  viewer && viewer.setGrade(S.st.grade); S.dirty = true; scheduleSave('grade');
+});
 
 // ---------------------------------------------------------------- objectifs (calibration)
 for (const k of ['fov', 'blend', 'a_yaw', 'a_pitch', 'a_roll', 'b_yaw', 'b_pitch', 'b_roll']) {

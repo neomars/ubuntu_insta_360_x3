@@ -10,6 +10,7 @@ pub mod calibration;
 pub mod cli;
 pub mod error;
 pub mod geometry;
+pub mod grade;
 pub mod jobs;
 pub mod media;
 pub mod pipeline;

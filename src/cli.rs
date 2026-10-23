@@ -7,6 +7,7 @@ use crate::app::App;
 use crate::calibration::Calibration;
 use crate::error::{export_err, is_cancelled, is_user_error, Result};
 use crate::geometry::{Keyframe, Mat3, Ypr};
+use crate::grade::Grade;
 use crate::media::{probe_source, Layout};
 use crate::pipeline::{self, default_fov, ExportSettings};
 use crate::project::{Project, StabOverride};
@@ -125,6 +126,30 @@ struct ExportArgs {
     /// Dossier de sortie par défaut
     #[arg(long)]
     output_dir: Option<PathBuf>,
+    /// Luminosité, de -0,5 à 0,5
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    brightness: f64,
+    /// Contraste, de 0,5 à 2
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    contrast: f64,
+    /// Saturation, de 0 (noir et blanc) à 2
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    saturation: f64,
+    /// Tons moyens, de 0,5 à 2 (plus de 1 = plus clair)
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    gamma: f64,
+    /// Chaleur, de -1 (bleuté) à 1 (orangé)
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    warmth: f64,
+    /// Teinte, de -1 (vert) à 1 (magenta)
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    tint: f64,
+    /// Netteté, de 0 à 1
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    sharpen: f64,
+    /// Réduction du bruit, de 0 à 1
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    denoise: f64,
 }
 
 /// Options de la vue de la caméra virtuelle.
@@ -296,6 +321,16 @@ fn settings(args: &ExportArgs) -> ExportSettings {
         crf: args.crf,
         preset: args.preset.clone(),
         audio: !args.no_audio,
+        grade: Grade {
+            brightness: args.brightness,
+            contrast: args.contrast,
+            saturation: args.saturation,
+            gamma: args.gamma,
+            warmth: args.warmth,
+            tint: args.tint,
+            sharpen: args.sharpen,
+            denoise: args.denoise,
+        },
         ..Default::default()
     }
 }
@@ -349,6 +384,14 @@ fn run_export(
         ("--strength", args.strength),
         ("--heading", args.heading),
         ("--t", snapshot_t.unwrap_or(0.0)),
+        ("--brightness", args.brightness),
+        ("--contrast", args.contrast),
+        ("--saturation", args.saturation),
+        ("--gamma", args.gamma),
+        ("--warmth", args.warmth),
+        ("--tint", args.tint),
+        ("--sharpen", args.sharpen),
+        ("--denoise", args.denoise),
     ])?;
     let stab = stab_matrices(p, args)?;
     let ext = if snapshot_t.is_some() { "jpg" } else { "mp4" };

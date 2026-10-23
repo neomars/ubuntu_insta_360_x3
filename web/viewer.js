@@ -1,7 +1,7 @@
 // Visionneuse 360° WebGL : assemble les deux fisheye (ou lit un équirectangulaire),
 // applique la stabilisation + la vue, et projette en rectiligne / fisheye / petite planète.
 // Les formules sont celles de x3studio/render.py (vérifiées contre FFmpeg v360).
-import { IDENTITY, mul3, transpose3, effectiveBlend, lensMatrices } from './geometry.js';
+import { IDENTITY, GRADE_DEFAULT, mul3, transpose3, effectiveBlend, lensMatrices, gradeChromaShift, gradeColorIsNeutral } from './geometry.js';
 
 const VERT = `
 attribute vec2 aPos;
@@ -15,7 +15,21 @@ uniform sampler2D uTex;
 uniform mat3 uM, uRA, uRB;
 uniform float uFov, uAspect, uLensHalf, uBlend, uSwap, uSeam, uDist;
 uniform int uProj, uKind;
+uniform vec4 uGA;     // réglages d'image : luminosité, contraste, 1/gamma, saturation
+uniform vec2 uGB;     // décalage de chrominance (Cb, Cr) : chaleur + teinte
+uniform float uGOn;
 const float PI = 3.14159265359;
+
+// Réglages d'image dans l'espace Y'CbCr BT.709 : miroir de src/grade.rs.
+vec3 grade(vec3 c) {
+  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float cb = (c.b - y) / 1.8556, cr = (c.r - y) / 1.5748;
+  y = pow(max(clamp(y, 0.0, 1.0), 1e-6), uGA.z);
+  y = clamp((y - 0.5) * uGA.y + 0.5 + uGA.x, 0.0, 1.0);
+  cb = clamp(cb * uGA.w + uGB.x, -0.5, 0.5);
+  cr = clamp(cr * uGA.w + uGB.y, -0.5, 0.5);
+  return clamp(vec3(y + 1.5748 * cr, y - 0.187324 * cb - 0.468124 * cr, y + 1.8556 * cb), 0.0, 1.0);
+}
 
 vec3 outRay() {
   vec2 u = vP;
@@ -65,7 +79,8 @@ void main() {
   if (uKind == 1) {
     float lon = atan(d.x, d.z);
     float lat = asin(clamp(d.y, -1.0, 1.0));
-    gl_FragColor = vec4(texture2D(uTex, vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI)).rgb, 1.0);
+    vec3 c = texture2D(uTex, vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI)).rgb;
+    gl_FragColor = vec4(uGOn > 0.5 ? grade(c) : c, 1.0);
     return;
   }
   float thA, thB;
@@ -82,6 +97,7 @@ void main() {
   float s = wA + wB;
   float w = s > 1e-5 ? wA / s : 0.5;
   vec3 col = mix(cB.rgb, cA.rgb, w);
+  if (uGOn > 0.5) col = grade(col);
   if (uSeam > 0.5) col = mix(col, vec3(1.0, 0.0, 1.0), 0.6 * (1.0 - abs(2.0 * w - 1.0)));
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -110,7 +126,7 @@ export class Viewer {
     gl.useProgram(prog);
     this.prog = prog;
     this.u = {};
-    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uDist', 'uProj', 'uKind'])
+    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uDist', 'uProj', 'uKind', 'uGA', 'uGB', 'uGOn'])
       this.u[n] = gl.getUniformLocation(prog, n);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -130,6 +146,7 @@ export class Viewer {
     this.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
     this.stab = IDENTITY;       // matrice courante (sortie -> sphère de la caméra)
     this.seam = false;
+    this.grade = { ...GRADE_DEFAULT };
     this.hasFrame = false;
   }
 
@@ -138,6 +155,7 @@ export class Viewer {
   setProjection(p) { this.projection = p; }
   setView(v) { this.view = v; }
   setStabMatrix(m) { this.stab = m; }
+  setGrade(g) { this.grade = { ...GRADE_DEFAULT, ...g }; }
 
   uploadFrame() {
     const v = this.video;
@@ -178,6 +196,10 @@ export class Viewer {
     gl.uniform1f(u.uDist, this.projection === 'flat' ? Math.min(2, Math.max(0, this.view.distortion || 0)) : 0);
     gl.uniform1i(u.uProj, PROJ[this.projection] ?? 0);
     gl.uniform1i(u.uKind, this.kind === 'equirect' ? 1 : 0);
+    const g = this.grade, shift = gradeChromaShift(g);
+    gl.uniform4f(u.uGA, g.brightness, g.contrast, 1 / g.gamma, g.saturation);
+    gl.uniform2f(u.uGB, shift[0], shift[1]);
+    gl.uniform1f(u.uGOn, gradeColorIsNeutral(g) ? 0 : 1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

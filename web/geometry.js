@@ -79,6 +79,26 @@ export function fovRange(projection, distortion = 0) {
   return [lo, Math.max(hi, Math.min(340, 2 * perspectiveLimit(distortion) * 180 / Math.PI * 0.999))];
 }
 
+// Réglages d'image : miroir de src/grade.rs (mêmes bornes, mêmes décalages de chrominance).
+export const GRADE_DEFAULT = { brightness: 0, contrast: 1, saturation: 1, gamma: 1, warmth: 0, tint: 0, sharpen: 0, denoise: 0 };
+export const GRADE_RANGE = {
+  brightness: [-0.5, 0.5], contrast: [0.5, 2], saturation: [0, 2], gamma: [0.5, 2],
+  warmth: [-1, 1], tint: [-1, 1], sharpen: [0, 1], denoise: [0, 1],
+};
+const WARMTH_SHIFT = [-0.08, 0.07], TINT_SHIFT = [0.051, 0.06];
+
+export function gradeWithDefaults(g) { return Object.assign({}, GRADE_DEFAULT, g || {}); }
+
+// Décalage de chrominance (Cb, Cr) dû à la chaleur et à la teinte.
+export function gradeChromaShift(g) {
+  return [WARMTH_SHIFT[0] * g.warmth + TINT_SHIFT[0] * g.tint, WARMTH_SHIFT[1] * g.warmth + TINT_SHIFT[1] * g.tint];
+}
+
+// Vrai si les réglages de couleur ne changent rien (netteté et bruit n'agissent qu'à l'export).
+export function gradeColorIsNeutral(g) {
+  return ['brightness', 'contrast', 'saturation', 'gamma', 'warmth', 'tint'].every((k) => g[k] === GRADE_DEFAULT[k]);
+}
+
 export function fmtTime(t) {
   if (!isFinite(t)) return '0:00.0';
   const m = Math.floor(t / 60), s = t - m * 60;

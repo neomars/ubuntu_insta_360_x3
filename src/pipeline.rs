@@ -8,6 +8,7 @@
 use crate::calibration::Calibration;
 use crate::error::{export_err, media_err, Cancelled, Result};
 use crate::geometry::{interpolate_view, Keyframe, Mat3, View, Ypr};
+use crate::grade::Grade;
 use crate::media::{Layout, Source};
 pub use crate::render::MAX_DISTORTION;
 use crate::render::{perspective_limit, LensRenderer, Projection, SourceKind};
@@ -55,6 +56,8 @@ pub struct ExportSettings {
     pub orientation: Ypr,
     /// Balises « vidéo sphérique » dans le MP4 (mode `equirect`).
     pub spherical_metadata: bool,
+    /// Réglages d'image (couleur sur l'image rendue ; netteté et bruit par les filtres FFmpeg).
+    pub grade: Grade,
 }
 
 impl Default for ExportSettings {
@@ -77,6 +80,7 @@ impl Default for ExportSettings {
             view: serde_json::json!({}),
             orientation: Ypr::default(),
             spherical_metadata: true,
+            grade: Grade::default(),
         }
     }
 }
@@ -157,6 +161,7 @@ impl ExportSettings {
         if self.fps < 0.0 || self.fps > 240.0 {
             return Err(export_err("La cadence de sortie doit être comprise entre 0 (source) et 240 i/s."));
         }
+        self.grade.validate()?;
         Ok(())
     }
 }
@@ -184,6 +189,8 @@ pub struct Plan {
     pub dists: Vec<f64>,
     /// Injecter les métadonnées sphériques après l'encodage.
     pub spherical: bool,
+    /// Correction de couleur appliquée à chaque image rendue.
+    pub grade: Grade,
 }
 
 /// Argument protégé pour un affichage « copiable dans un terminal » (comme `shlex.quote`).
@@ -340,10 +347,15 @@ fn atempo_chain(speed: f64) -> String {
     parts.join(",")
 }
 
+/// Étiquettes de couleur des vidéos écrites : BT.709, plage limitée. Les images traversent le moteur sans
+/// conversion de matrice (comme la caméra, qui filme en BT.709) ; l'étiquette fixe leur lecture, pour les lecteurs
+/// comme pour l'aperçu, qui suppose la matrice BT.709 dans les réglages d'image.
+const COLOR_TAGS: [&str; 6] = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"];
+
 fn encoder_args(s: &ExportSettings) -> Vec<String> {
     let v = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let crf = s.crf.to_string();
-    if s.codec == "h265" {
+    let mut args = if s.codec == "h265" {
         v(&[
             "-c:v",
             "libx265",
@@ -360,7 +372,9 @@ fn encoder_args(s: &ExportSettings) -> Vec<String> {
         ])
     } else {
         v(&["-c:v", "libx264", "-preset", &s.preset, "-crf", &crf, "-pix_fmt", "yuv420p"])
-    }
+    };
+    args.extend(COLOR_TAGS.map(String::from));
+    args
 }
 
 fn stream_rank(src: &Source, i: usize) -> Result<usize> {
@@ -394,9 +408,10 @@ fn input_args(src: &Source, start: f64, dur: f64) -> Vec<String> {
 }
 
 /// Graphe du décodeur : images I420 `[flux 0 | flux 1]` (ou équirectangulaires déjà assemblées). L'échange
-/// éventuel des objectifs (`swap_lenses`) est fait par le moteur de rendu, pas ici.
-fn decoder_graph(src: &Source, fps_filter: &str) -> Result<String> {
-    let (a, f) = (stream_rank(src, 0)?, fps_filter);
+/// éventuel des objectifs (`swap_lenses`) est fait par le moteur de rendu, pas ici. `pre` : filtres appliqués à
+/// chaque flux avant la conversion (changement de cadence, réduction du bruit), chacun suivi d'une virgule.
+fn decoder_graph(src: &Source, pre: &str) -> Result<String> {
+    let (a, f) = (stream_rank(src, 0)?, pre);
     Ok(match src.layout {
         Layout::TwoStreams => {
             let b = stream_rank(src, 1)?;
@@ -454,13 +469,17 @@ pub fn build_plan(
     let renderer = make_renderer(src, calib, s)?;
     let (ow, oh) = output_size(src, s);
 
-    let fps_f = if (pfps - src.fps).abs() > 0.01 { format!("fps={pfps:.5},") } else { String::new() };
+    let mut pre = if (pfps - src.fps).abs() > 0.01 { format!("fps={pfps:.5},") } else { String::new() };
+    if let Some(f) = s.grade.denoise_filter() {
+        pre += &format!("{f},");
+    }
     let mut decoder = base_command(false);
     decoder.extend(input_args(src, start, dur));
-    decoder.extend(["-filter_complex".into(), decoder_graph(src, &fps_f)?]);
+    decoder.extend(["-filter_complex".into(), decoder_graph(src, &pre)?]);
     decoder.extend(["-map", "[v]", "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"].map(String::from));
 
     let mut post = vec![];
+    post.extend(s.grade.sharpen_filter());
     if (speed - 1.0).abs() > 1e-3 {
         post.push(format!("setpts=PTS/{speed:.5}"));
     }
@@ -516,8 +535,23 @@ pub fn build_plan(
         fovs,
         dists,
         spherical,
+        grade: s.grade,
     })
 }
+
+/// Les images brutes qui arrivent à l'encodeur d'une capture n'ont pas d'étiquette : on leur donne celle de la
+/// caméra (BT.709, plage limitée) avant toute conversion vers le RVB.
+macro_rules! snapshot_tags {
+    () => {
+        "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+    };
+}
+/// PNG : RVB 8 bits, converti avec la matrice BT.709.
+const SNAPSHOT_PNG_CHAIN: &str = concat!(snapshot_tags!(), ",format=rgb24");
+/// JPEG : les lecteurs lisent un JPEG avec la matrice BT.601 (JFIF), plage pleine. FFmpeg ne change pas de matrice entre
+/// deux formats YUV : on passe par le RVB (BT.709 en entrée, BT.601 en sortie) pour que les couleurs soient celles de l'aperçu.
+const SNAPSHOT_JPEG_CHAIN: &str =
+    concat!(snapshot_tags!(), ",format=gbrp,scale=out_color_matrix=bt601:out_range=pc,format=yuvj420p");
 
 /// Plan d'une image fixe (`.jpg`/`.png`) à l'instant `t` : un seul rendu, encodé par FFmpeg.
 pub fn build_snapshot_plan(
@@ -541,7 +575,8 @@ pub fn build_snapshot_plan(
 
     let mut decoder = base_command(false);
     decoder.extend(input_args(src, t, (end - t).max(0.05)));
-    decoder.extend(["-filter_complex".into(), decoder_graph(src, "")?]);
+    let pre = s.grade.denoise_filter().map(|f| format!("{f},")).unwrap_or_default();
+    decoder.extend(["-filter_complex".into(), decoder_graph(src, &pre)?]);
     decoder.extend(
         ["-map", "[v]", "-an", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"].map(String::from),
     );
@@ -553,7 +588,11 @@ pub fn build_snapshot_plan(
     encoder.extend([format!("{ow}x{oh}"), "-framerate".into(), "1".into(), "-i".into(), "-".into()]);
     encoder.extend([
         "-filter_complex".to_string(),
-        format!("[0:v]format={}[vout]", if is_jpg { "yuvj420p" } else { "rgb24" }),
+        format!(
+            "[0:v]{}{}[vout]",
+            s.grade.sharpen_filter().map(|f| format!("{f},")).unwrap_or_default(),
+            if is_jpg { SNAPSHOT_JPEG_CHAIN } else { SNAPSHOT_PNG_CHAIN }
+        ),
         "-map".into(),
         "[vout]".into(),
         "-an".into(),
@@ -575,6 +614,7 @@ pub fn build_snapshot_plan(
         fovs,
         dists,
         spherical: false,
+        grade: s.grade,
     })
 }
 
@@ -634,6 +674,7 @@ pub fn build_proxy_cmd(src: &Source, out: &Path, lens_px: u32) -> Vec<String> {
         ]
         .map(String::from),
     );
+    cmd.extend(COLOR_TAGS.map(String::from));
     cmd.push(out.to_string_lossy().into_owned());
     cmd
 }
@@ -881,6 +922,8 @@ fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &Atomi
             };
             let mut out = out_free_rx.try_recv().unwrap_or_else(|_| vec![0u8; n_out]);
             plan.renderer.render_with(&frame, &plan.mats[done], plan.fovs[done], plan.dists[done], &mut out);
+            let (ow, oh) = plan.renderer.out_size();
+            plan.grade.apply_i420(&mut out, ow as usize, oh as usize);
             let _ = free_tx.send(frame);
             if out_tx.send(out).is_err() {
                 break; // le thread d'écriture s'est arrêté : l'encodeur est mort
@@ -1110,18 +1153,56 @@ mod tests {
     }
 
     #[test]
+    fn image_adjustments_reach_the_filter_graphs_and_the_plan() {
+        let src = x3(10.0, 30.0);
+        let calib = Calibration::default();
+        let g = Grade { sharpen: 1.0, denoise: 0.5, brightness: 0.1, ..Default::default() };
+        let s = ExportSettings { grade: g, ..Default::default() };
+        let plan = build_plan(&src, &calib, &s, Path::new("o.mp4"), None).unwrap();
+        assert_eq!(plan.grade, g);
+        let dec = arg_after(&plan.decoder, "-filter_complex").unwrap();
+        assert!(dec.contains("[0:v:0]hqdn3d=4.000:3.000:6.000:4.500,format=yuv420p[fa]"), "{dec}");
+        assert!(dec.contains("[0:v:1]hqdn3d=4.000:3.000:6.000:4.500,format=yuv420p[fb]"), "chaque objectif : {dec}");
+        let enc = arg_after(&plan.encoder, "-filter_complex").unwrap();
+        assert_eq!(enc, "[0:v]unsharp=5:5:1.500:5:5:0,format=yuv420p[vout]");
+        // le débruitage suit le changement de cadence, la netteté précède la vitesse
+        let s = ExportSettings { grade: g, speed: 2.0, fps: 10.0, ..Default::default() };
+        let plan = build_plan(&src, &calib, &s, Path::new("o.mp4"), None).unwrap();
+        assert!(arg_after(&plan.decoder, "-filter_complex").unwrap().contains("fps=20.00000,hqdn3d="));
+        assert!(arg_after(&plan.encoder, "-filter_complex")
+            .unwrap()
+            .starts_with("[0:v]unsharp=5:5:1.500:5:5:0,setpts="));
+        // sans réglage de détail, les graphes sont ceux d'avant
+        let plain = build_plan(&src, &calib, &ExportSettings::default(), Path::new("o.mp4"), None).unwrap();
+        assert!(!arg_after(&plain.decoder, "-filter_complex").unwrap().contains("hqdn3d"));
+        assert_eq!(arg_after(&plain.encoder, "-filter_complex"), Some("[0:v]format=yuv420p[vout]"));
+        // la capture reçoit les mêmes filtres
+        let snap = build_snapshot_plan(&src, &calib, &s, 1.0, Path::new("o.png"), None).unwrap();
+        assert!(arg_after(&snap.decoder, "-filter_complex").unwrap().contains("hqdn3d="));
+        assert!(arg_after(&snap.encoder, "-filter_complex").unwrap().starts_with("[0:v]unsharp="));
+        // valeurs hors bornes : erreur « utilisateur » avant tout lancement
+        let bad = ExportSettings { grade: Grade { contrast: 3.0, ..Default::default() }, ..Default::default() };
+        let e = build_plan(&src, &calib, &bad, Path::new("o.mp4"), None).err().unwrap();
+        assert!(is_user_error(&e) && e.to_string().contains("contraste"), "{e}");
+    }
+
+    #[test]
     fn atempo_and_encoders() {
         assert_eq!(atempo_chain(1.5), "atempo=1.50000");
         assert_eq!(atempo_chain(4.0), "atempo=2.0,atempo=2.00000");
         assert_eq!(atempo_chain(8.0), "atempo=2.0,atempo=2.0,atempo=2.00000");
         assert_eq!(atempo_chain(0.25), "atempo=0.5,atempo=0.50000");
         let h264 = encoder_args(&ExportSettings { crf: 18, preset: "slow".into(), ..Default::default() });
-        assert_eq!(h264.join(" "), "-c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p");
+        assert_eq!(
+            h264.join(" "),
+            "-c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709"
+        );
         let h265 = encoder_args(&ExportSettings { codec: "h265".into(), ..Default::default() }).join(" ");
         assert!(
             h265.contains("-c:v libx265")
                 && h265.contains("-tag:v hvc1")
-                && h265.contains("-x265-params log-level=error"),
+                && h265.contains("-x265-params log-level=error")
+                && h265.ends_with("-colorspace bt709 -color_primaries bt709 -color_trc bt709"),
             "{h265}"
         );
     }
@@ -1239,11 +1320,20 @@ mod tests {
             "borné à la dernière image, une demi-image d'avance"
         );
         assert!(jpg.decoder.windows(2).any(|w| w == ["-frames:v", "1"]));
-        assert_eq!(arg_after(&jpg.encoder, "-filter_complex"), Some("[0:v]format=yuvj420p[vout]"));
+        let chain = arg_after(&jpg.encoder, "-filter_complex").unwrap();
+        assert!(
+            chain.starts_with("[0:v]setparams=range=tv:colorspace=bt709")
+                && chain.ends_with("format=gbrp,scale=out_color_matrix=bt601:out_range=pc,format=yuvj420p[vout]"),
+            "JPEG : BT.709 -> RVB -> BT.601 plage pleine : {chain}"
+        );
         assert_eq!(arg_after(&jpg.encoder, "-q:v"), Some("2"));
         let png = build_snapshot_plan(&src, &calib, &s, -5.0, Path::new("/tmp/c.png"), None).unwrap();
         assert_eq!(arg_after(&png.decoder, "-ss"), Some("0.0000"));
-        assert_eq!(arg_after(&png.encoder, "-filter_complex"), Some("[0:v]format=rgb24[vout]"));
+        let chain = arg_after(&png.encoder, "-filter_complex").unwrap();
+        assert!(
+            chain.starts_with("[0:v]setparams=range=tv:colorspace=bt709") && chain.ends_with("format=rgb24[vout]"),
+            "PNG : {chain}"
+        );
         assert!(arg_after(&png.encoder, "-q:v").is_none());
         assert!(build_snapshot_plan(&src, &calib, &s, f64::NAN, Path::new("c.png"), None).is_err());
         // l'instant sert aussi à choisir les keyframes et la stabilisation

@@ -58,6 +58,7 @@
   <aside class="panel">
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="reframe" role="tab">Recadrage</button>
+      <button class="tab" data-tab="image" role="tab">Image</button>
       <button class="tab" data-tab="stab" role="tab">Stabilisation</button>
       <button class="tab" data-tab="lens" role="tab">Objectifs</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
@@ -83,6 +84,20 @@
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>
       <p id="kf-empty" class="hint">Aucun keyframe.</p>
+    </section>
+
+    <section class="pane" id="pane-image">
+      <h3>Couleur <button id="btn-grade-reset" class="btn small ghost">Réinitialiser</button></h3>
+      <div class="field"><label for="g-brightness">Luminosité</label><input id="g-brightness" type="range" min="-0.5" max="0.5" step="0.01"><output></output></div>
+      <div class="field"><label for="g-contrast">Contraste</label><input id="g-contrast" type="range" min="0.5" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-gamma">Tons moyens <small>plus de 1 = plus clair</small></label><input id="g-gamma" type="range" min="0.5" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-saturation">Saturation</label><input id="g-saturation" type="range" min="0" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-warmth">Chaleur <small>bleuté ↔ orangé</small></label><input id="g-warmth" type="range" min="-1" max="1" step="0.01"><output></output></div>
+      <div class="field"><label for="g-tint">Teinte <small>vert ↔ magenta</small></label><input id="g-tint" type="range" min="-1" max="1" step="0.01"><output></output></div>
+      <h3>Détail <small>appliqué à l'export, pas à l'aperçu</small></h3>
+      <div class="field"><label for="g-sharpen">Netteté</label><input id="g-sharpen" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <div class="field"><label for="g-denoise">Réduction du bruit</label><input id="g-denoise" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <p class="hint">Les réglages de couleur s'appliquent à l'aperçu et à l'export, avec le même calcul. La réduction du bruit est utile en faible lumière ; la netteté compense l'adoucissement dû à la réduction de l'image 360° en vidéo plate.</p>
     </section>
 
     <section class="pane" id="pane-stab">

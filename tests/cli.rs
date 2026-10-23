@@ -524,3 +524,65 @@ fn the_gui_reports_startup_problems_without_panicking() {
     // port invalide : erreur d'usage
     assert_eq!(e.x3(&["gui", "--port", "70000"]).status.code(), Some(2));
 }
+
+#[test]
+fn image_adjustments_are_options_checked_and_visible_in_the_commands() {
+    let e = Env::new();
+    let c = static_clip();
+    // netteté et bruit changent les filtres FFmpeg ; la couleur est appliquée par le moteur
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--sharpen", "0.5", "--denoise", "0.5"]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let out = text(&r.stdout);
+    assert!(out.contains("hqdn3d=4.000:3.000:6.000:4.500") && out.contains("unsharp=5:5:0.750:5:5:0"), "{out}");
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run"]);
+    let out = text(&r.stdout);
+    assert!(!out.contains("hqdn3d") && !out.contains("unsharp"), "sans réglage, aucun filtre en plus : {out}");
+    // une valeur négative s'écrit sans « = » ; hors bornes ou non numérique : erreur claire
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "--dry-run",
+        "--brightness",
+        "-0.2",
+        "--contrast",
+        "1.3",
+        "--saturation",
+        "0.5",
+        "--gamma",
+        "1.2",
+        "--warmth",
+        "-0.4",
+        "--tint",
+        "0.1",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    for (opt, value, word) in [
+        ("--brightness", "0.9", "luminosité"),
+        ("--contrast", "5", "contraste"),
+        ("--saturation", "-1", "saturation"),
+        ("--gamma", "0", "tons moyens"),
+        ("--warmth", "2", "chaleur"),
+        ("--tint", "-2", "teinte"),
+        ("--sharpen", "1.5", "netteté"),
+        ("--denoise", "-0.5", "bruit"),
+    ] {
+        let r = e.x3(&["reframe", p(&c.path), "--dry-run", opt, value]);
+        assert_eq!(r.status.code(), Some(1), "{opt} {value}");
+        assert!(text(&r.stderr).contains(word), "{opt} {value} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--gamma", "nan"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("Valeur invalide"), "{}", text(&r.stderr));
+    // l'export réel applique la correction (image plus claire qu'avec les réglages neutres)
+    let mean = |args: &[&str], name: &str| {
+        let out = e.out(name);
+        let mut a = vec!["snapshot", p(&c.path), "-o", p(&out), "--size", "160x90", "--t", "0.5"];
+        a.extend_from_slice(args);
+        let r = e.x3(&a);
+        assert!(r.status.success(), "{}", text(&r.stderr));
+        let (img, ..) = read_image(&out);
+        img.iter().map(|&v| f64::from(v)).sum::<f64>() / img.len() as f64
+    };
+    let (plain, bright) = (mean(&[], "plain.jpg"), mean(&["--brightness", "0.2"], "bright.jpg"));
+    assert!(bright > plain + 20.0, "{plain:.1} -> {bright:.1}");
+}
