@@ -20,16 +20,21 @@ x3studio \- traitement local des vidéos Insta360 X3
 .B x3studio snapshot
 \fIFICHIER\fR [\fB\-o\fR \fISORTIE.jpg\fR] [\fB\-\-t\fR \fISECONDES\fR] [\fIOPTIONS\fR]
 .br
+.B x3studio track
+\fIFICHIER\fR \fB\-\-t\fR \fISECONDES\fR \fB\-\-yaw\fR \fIDEGRÉS\fR \fB\-\-pitch\fR \fIDEGRÉS\fR [\fB\-o\fR \fIKEYFRAMES.json\fR] [\fIOPTIONS\fR]
+.br
 .B x3studio demo
-\fISORTIE.insv\fR [\fB\-\-seconds\fR \fIN\fR] [\fB\-\-lens\fR \fIPX\fR] [\fB\-\-motion\fR shake|pan|static]
+\fISORTIE.insv\fR [\fB\-\-seconds\fR \fIN\fR] [\fB\-\-lens\fR \fIPX\fR] [\fB\-\-motion\fR shake|pan|static] [\fB\-\-subject\fR]
 .br
 .B x3studio \-\-help | \-\-version
 .SH DESCRIPTION
 .B x3studio
 assemble et retravaille les fichiers .insv de la caméra Insta360 X3 (et leurs versions basse résolution .lrv) : caméra
 virtuelle avec keyframes (recadrage plat, fisheye, petite planète),
-stabilisation par analyse d'image, calibration des objectifs, export H.264 ou
-H.265 en vidéo plate ou en vidéo 360° équirectangulaire.
+plusieurs perspectives dans la même vidéo, suivi de sujet, réglages d'image,
+retrait de la perche à selfie, stabilisation par analyse d'image, calibration
+des objectifs, export H.264 ou H.265 en vidéo plate ou en vidéo 360°
+équirectangulaire.
 .PP
 Tout est traité localement. Sans argument (ou avec un nom de fichier),
 .B x3studio
@@ -55,9 +60,21 @@ Exporte une vidéo plate. Options : \fB\-\-projection\fR flat|fisheye|planet,
 \fB\-\-size\fR \fILxH\fR (défaut 1920x1080, valeurs paires),
 \fB\-\-yaw\fR, \fB\-\-pitch\fR, \fB\-\-roll\fR (degrés), \fB\-\-fov\fR (champ
 horizontal en degrés ; défaut selon la projection : 90, 180 ou 250),
+\fB\-\-distortion\fR \fID\fR (0 à 2 ; perspective plate seulement :
+0 = rectiligne, 1 = petite planète, entre les deux grand angle et ultra grand
+angle ; le champ \fB\-\-fov\fR peut alors dépasser 170°),
 \fB\-\-keyframes\fR \fIFICHIER.json\fR (liste d'objets
-{"t": secondes, "yaw", "pitch", "roll", "fov"} ; les champs absents gardent la
-valeur de la vue de base).
+{"t": secondes, "yaw", "pitch", "roll", "fov", "distortion", "ease"} ; les champs absents gardent la
+valeur de la vue de base ; "ease": "linear" donne une vitesse constante jusqu'au keyframe
+suivant au lieu du départ et de l'arrivée en douceur).
+.br
+\fB\-\-layout\fR single|side|stack|pip|trio|quad affiche plusieurs vues dans la
+même image : côte à côte, haut et bas, incrustation, une grande vue et deux
+petites, quatre vues. La vue 1 est celle des options ci\-dessus ;
+\fB\-\-views\fR \fIFICHIER.json\fR décrit les vues 2, 3\&... (liste d'objets
+{"projection", "view": {"yaw", "pitch", "roll", "fov", "distortion"}, "keyframes": [...]}) ; sans
+fichier, elles se répartissent sur le tour de l'horizon (côte à côte : avant et arrière).
+\fB\-\-layout\-gap\fR \fIPX\fR (multiple de 4, 0 à 40) sépare les vues par un écart noir.
 .TP
 .B equirect
 Exporte la vidéo 360° assemblée avec les balises « vidéo sphérique » ;
@@ -67,10 +84,22 @@ Exporte la vidéo 360° assemblée avec les balises « vidéo sphérique » ;
 Enregistre une image de la vue à l'instant \fB\-\-t\fR : JPEG, ou PNG si le nom
 de sortie se termine par .png. Mêmes options de vue que \fBreframe\fR.
 .TP
+.B track
+Suit un sujet désigné à l'instant \fB\-\-t\fR (secondes), dans la direction
+\fB\-\-yaw\fR, \fB\-\-pitch\fR (degrés, repère de la vue, comme les options de
+\fBreframe\fR), de taille apparente \fB\-\-size\fR (3 à 40°, défaut 12), et écrit les
+keyframes (cap et inclinaison) qui le gardent au centre, prêts pour
+\fBreframe \-\-keyframes\fR. \fB\-\-start\fR et \fB\-\-end\fR limitent la plage,
+\fB\-\-no\-backward\fR ne suit pas avant l'instant désigné. \fB\-\-stabilize\fR,
+\fB\-\-strength\fR, \fB\-\-heading\fR, \fB\-\-orient\fR et \fB\-\-calibration\fR sont ceux de
+l'export qui utilisera les keyframes. Le suivi est un suivi de motif : il s'arrête
+(« sujet perdu ») quand le sujet disparaît ou change trop.
+.TP
 .B demo
 Génère un fichier .insv synthétique (deux objectifs fisheye de \fB\-\-lens\fR
 pixels, \fB\-\-seconds\fR secondes) pour essayer le logiciel sans caméra ;
-\fB\-\-motion\fR shake (tremblement), pan (rotation lente) ou static.
+\fB\-\-motion\fR shake (tremblement), pan (rotation lente) ou static ;
+\fB\-\-subject\fR ajoute un sujet mobile pour essayer le suivi.
 .SH OPTIONS COMMUNES D'EXPORT
 .TP
 .BR \-o ", " \-\-output " " \fIFICHIER\fR
@@ -103,6 +132,23 @@ Lissage de la stabilisation et lissage du cap en mode horizon, en secondes
 .B \-\-orient \fICAP,INCLINAISON,ROULIS\fR
 Orientation de la caméra (recentrage, mise à niveau de l'horizon), en degrés.
 .TP
+.BR \-\-brightness " " \fIV\fR ", " \-\-contrast " " \fIV\fR ", " \-\-saturation " " \fIV\fR ", " \-\-gamma " " \fIV\fR
+Réglages d'image de couleur : luminosité (\-0,5 à 0,5), contraste (0,5 à 2), saturation
+(0 à 2), tons moyens (0,5 à 2 ; plus de 1 éclaircit). Valeurs neutres : 0, 1, 1, 1.
+.TP
+.BR \-\-warmth " " \fIV\fR ", " \-\-tint " " \fIV\fR
+Chaleur (\-1 bleuté à 1 orangé) et teinte (\-1 vert à 1 magenta).
+.TP
+.BR \-\-sharpen " " \fIV\fR ", " \-\-denoise " " \fIV\fR
+Netteté et réduction du bruit, de 0 à 1 (filtres FFmpeg : \fBunsharp\fR, \fBhqdn3d\fR).
+.TP
+.B \-\-stick off|mirror|cover
+Masque la perche à selfie (ou le trépied) : zone conique fixe dans le repère de la caméra,
+reconstruite par réflexion de son contour (\fBmirror\fR) ou recouverte d'une couleur
+(\fBcover\fR). \fB\-\-stick\-radius\fR \fID\fR (1 à 60°, défaut 20),
+\fB\-\-stick\-softness\fR \fIV\fR (bord du disque, 0 à 1), \fB\-\-stick\-axis\fR
+\fICAP,INCLINAISON\fR (défaut 0,\-90 : vers le bas) et \fB\-\-stick\-color\fR \fI#rrggbb\fR.
+.TP
 .B \-\-calibration \fIFICHIER.json\fR
 Calibration des objectifs : champs \fBfov\fR (200), \fBblend\fR (10),
 \fBa_yaw\fR, \fBa_pitch\fR, \fBa_roll\fR, \fBb_yaw\fR, \fBb_pitch\fR,
@@ -132,6 +178,12 @@ réinitialise la vidéo correspondante).
 .SH EXEMPLES
 .nf
 x3studio demo essai.insv
+x3studio demo suivi.insv \-\-subject \-\-motion static
+x3studio reframe VID_001.insv \-\-layout side \-\-size 1920x1080
+x3studio reframe VID_001.insv \-\-contrast 1.2 \-\-saturation 1.3 \-\-denoise 0.5
+x3studio equirect VID_001.insv \-\-stick mirror \-\-stick\-radius 18
+x3studio track VID_001.insv \-\-t 4.2 \-\-yaw 25 \-\-pitch 3 \-o suivi.json
+x3studio reframe VID_001.insv \-\-keyframes suivi.json \-\-fov 60
 x3studio reframe VID_001.insv \-\-yaw 30 \-\-fov 90 \-\-stabilize horizon
 x3studio equirect VID_001.insv \-\-width 5760 \-\-codec h265
 x3studio snapshot VID_001.insv \-\-t 12.5 \-\-projection planet \-o planete.png

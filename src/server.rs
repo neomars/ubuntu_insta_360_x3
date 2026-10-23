@@ -40,6 +40,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const VIEWER_JS: &str = include_str!("../web/viewer.js");
 const GEOMETRY_JS: &str = include_str!("../web/geometry.js");
+const RECORDER_JS: &str = include_str!("../web/recorder.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
 #[derive(Clone)]
@@ -245,6 +246,9 @@ async fn viewer_js() -> Response {
 }
 async fn geometry_js() -> Response {
     asset("text/javascript; charset=utf-8", GEOMETRY_JS)
+}
+async fn recorder_js() -> Response {
+    asset("text/javascript; charset=utf-8", RECORDER_JS)
 }
 async fn style_css() -> Response {
     asset("text/css; charset=utf-8", STYLE_CSS)
@@ -475,6 +479,45 @@ async fn api_analyze(State(st): State<ServerState>, UrlPath(id): UrlPath<String>
     Ok(Json(blocking(move || Ok(st.app.start_analysis(&p)?.to_json())).await?))
 }
 
+/// Lance le suivi d'un sujet : `{t, yaw, pitch, size?, start?, end?, backward?}` (cap et inclinaison du sujet dans
+/// le repère de la vue, à l'instant `t`).
+async fn api_track(State(st): State<ServerState>, UrlPath(id): UrlPath<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    let p = project_of(&st, &id)?;
+    let data = parse_body(&body)?;
+    Ok(Json(
+        blocking(move || {
+            let f = |k: &str| data.get(k).and_then(Value::as_f64);
+            let t0 = f("t").ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "Instant `t` manquant"))?;
+            let params = crate::tracker::TrackParams {
+                t0,
+                yaw: f("yaw").ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "Cap `yaw` manquant"))?,
+                pitch: f("pitch")
+                    .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "Inclinaison `pitch` manquante"))?,
+                size: f("size").unwrap_or(12.0),
+                start: f("start").unwrap_or(0.0),
+                end: f("end").unwrap_or(0.0),
+                backward: data.get("backward").and_then(Value::as_bool).unwrap_or(true),
+            };
+            Ok(st.app.start_tracking(&p, params)?.to_json())
+        })
+        .await?,
+    ))
+}
+
+/// Résultat du dernier suivi : `{job, params, track, keyframes}`, ou `{ready: false}` s'il n'y en a pas.
+async fn api_track_result(State(st): State<ServerState>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
+    let p = project_of(&st, &id)?;
+    Ok(Json(
+        blocking(move || {
+            Ok(match std::fs::read_to_string(crate::app::App::track_path(&p)) {
+                Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| json!({ "ready": false })),
+                Err(_) => json!({ "ready": false }),
+            })
+        })
+        .await?,
+    ))
+}
+
 async fn api_prepare(State(st): State<ServerState>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
     let p = project_of(&st, &id)?;
     Ok(Json(
@@ -609,6 +652,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/app.js", get(app_js))
         .route("/viewer.js", get(viewer_js))
         .route("/geometry.js", get(geometry_js))
+        .route("/recorder.js", get(recorder_js))
         .route("/style.css", get(style_css))
         .route("/api/info", get(api_info))
         .route("/api/fs", get(api_fs))
@@ -621,6 +665,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/project/{id}/state", put(api_state))
         .route("/api/project/{id}/analyze", post(api_analyze))
         .route("/api/project/{id}/prepare", post(api_prepare))
+        .route("/api/project/{id}/track", post(api_track).get(api_track_result))
         .route("/api/project/{id}/stab", get(api_stab))
         .route("/api/project/{id}/export", post(api_export))
         .route("/api/project/{id}/snapshot", post(api_snapshot))

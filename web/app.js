@@ -1,6 +1,7 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, IDENTITY, fmtTime, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, LAYOUT_TILES, defaultTileView, dirToYawPitch, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, layoutRects, mul3, multiWithDefaults, outputRay, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
+import { replaceKeyframes, simplifySamples } from './recorder.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
 const $ = (s, r = document) => r.querySelector(s);
@@ -30,6 +31,12 @@ function toast(msg, err = false, ms = 5000) {
 // ---------------------------------------------------------------- état
 const S = {
   proj: null, st: null, t: 0, dur: 0, fps: 30,
+  tile: 0,                   // vue en cours de modification (0 = la vue du projet, 1… = les vues supplémentaires)
+  listAt: 0,                 // dernier rafraîchissement de la liste des vues (ms)
+  pick: false,               // le prochain clic dans l'aperçu désigne le sujet à suivre
+  tracking: null,            // suivi en cours : { job, tile }
+  rec: null,                 // enregistrement du cadrage en cours : { tile, view, samples, rate }
+  recUndo: null,             // keyframes remplacés par le dernier enregistrement : { tile, keyframes }
   override: null,            // vue modifiée à la main, pas encore enregistrée
   stab: { arr: IDENTITY, n: 1 },
   selKf: -1, dirty: true, lastT: -1, info: null, jobs: [], saveTimer: null, pending: new Set(),
@@ -57,14 +64,28 @@ async function flushSave() {
 }
 
 // ---------------------------------------------------------------- vue courante
-function projection() { return S.st ? S.st.projection : 'flat'; }
-function baseView() { return S.st.view; }
+// Plusieurs perspectives : la vue 0 est celle du projet (`projection`, `view`, `keyframes` de l'état) ; les suivantes sont
+// dans `multi.views` avec les mêmes champs. Tout le panneau « Recadrage » agit sur la vue sélectionnée (`S.tile`).
+function tileCount() { return S.st ? LAYOUT_TILES[S.st.multi.layout] || 1 : 1; }
+function tileData(i = S.tile) { return i === 0 || !S.st ? S.st : S.st.multi.views[i - 1] || S.st; }
+function saveTile(...fields) { if (S.tile === 0) scheduleSave(...fields); else scheduleSave('multi'); }
+function projection() { return S.st ? tileData().projection : 'flat'; }
+function baseView() { return tileData().view; }
 function currentView(t) {
+  if (S.rec && S.rec.tile === S.tile) return S.rec.view;
   if (S.override) return S.override;
-  return interpolateView(S.st.keyframes, t, baseView());
+  return interpolateView(tileData().keyframes, t, baseView());
+}
+// Vue de la vue n° `i` à l'instant `t` (la vue en cours de modification peut être modifiée à la main, sans keyframe).
+function tileViewAt(i, t) {
+  if (S.rec && i === S.rec.tile) return S.rec.view;
+  if (i === S.tile && S.override) return S.override;
+  const d = tileData(i);
+  return interpolateView(d.keyframes, t, d.view);
 }
 function clampView(v) {
-  const [lo, hi] = FOV_RANGE[projection()];
+  v.distortion = projection() === 'flat' ? Math.min(MAX_DISTORTION, Math.max(0, v.distortion || 0)) : 0;
+  const [lo, hi] = fovRange(projection(), v.distortion);
   v.fov = Math.min(hi, Math.max(lo, v.fov));
   v.pitch = Math.min(90, Math.max(-90, v.pitch));
   v.yaw = wrap180(v.yaw);
@@ -73,36 +94,44 @@ function clampView(v) {
 }
 function editView(patchFn) {
   if (!S.st) return;
+  if (S.rec) {   // pendant l'enregistrement, la vue modifiée est celle qu'on filme : rien n'est enregistré avant l'arrêt
+    S.rec.view = clampView(patchFn({ ...S.rec.view }));
+    S.dirty = true; syncViewControls();
+    return;
+  }
   const t = S.t, v = clampView(patchFn({ ...currentView(t) }));
-  const kfs = S.st.keyframes;
+  const d = tileData(), kfs = d.keyframes;
   if (!kfs.length) {
-    S.st.view = v; S.override = null; scheduleSave('view');
+    d.view = v; S.override = null; saveTile('view');
   } else {
     const i = kfs.findIndex((k) => Math.abs(k.t - t) <= 1.5 / S.fps);
-    if (i >= 0) { Object.assign(kfs[i], v); S.override = null; scheduleSave('keyframes'); renderKeyframes(); }
+    if (i >= 0) { Object.assign(kfs[i], v); S.override = null; saveTile('keyframes'); renderKeyframes(); }
     else S.override = v;
   }
   S.dirty = true;
   syncViewControls();
 }
 
-const VIEW_CTRL = { yaw: '#v-yaw', pitch: '#v-pitch', roll: '#v-roll', fov: '#v-fov' };
+const VIEW_CTRL = { yaw: '#v-yaw', pitch: '#v-pitch', roll: '#v-roll', fov: '#v-fov', distortion: '#v-dist' };
 function syncViewControls() {
   if (!S.st) return;
-  const v = currentView(S.t);
+  const v = { distortion: 0, ...currentView(S.t) };
+  const [lo, hi] = fovRange(projection(), v.distortion);
+  const fovEl = $('#v-fov'); fovEl.min = lo; fovEl.max = hi;
   for (const k of Object.keys(VIEW_CTRL)) {
     const el = $(VIEW_CTRL[k]);
     if (document.activeElement !== el) el.value = v[k];
-    $('#o-' + k).textContent = `${v[k].toFixed(k === 'fov' ? 0 : 1)}°`;
+    $('#o-' + k).textContent = k === 'distortion' ? v[k].toFixed(2) : `${v[k].toFixed(k === 'fov' ? 0 : 1)}°`;
   }
-  $('#hud-readout').textContent = `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
+  $('#hud-readout').textContent = (tileCount() > 1 ? `vue ${S.tile + 1}  ·  ` : '') + `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (v.distortion > 0.005 ? `  dist. ${v.distortion.toFixed(2)}` : '') + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
 }
 
 function setProjectionUI() {
-  const [lo, hi] = FOV_RANGE[projection()];
+  const [lo, hi] = fovRange(projection(), S.st ? baseView().distortion || 0 : 0);
   const f = $('#v-fov'); f.min = lo; f.max = hi;
   $('#proj').value = projection();
-  viewer && viewer.setProjection(projection());
+  $('#f-dist').hidden = projection() !== 'flat';
+  viewer && viewer.setProjection(S.st ? S.st.projection : 'flat');
 }
 
 // ---------------------------------------------------------------- stabilisation (aperçu)
@@ -141,12 +170,22 @@ function frameLoop() {
     if (moving && S.override) S.override = null;
     S.t = t; S.lastT = t;
     const tr = S.st.trim;
-    if (moving && tr.end > 0 && t >= tr.end) { video.currentTime = tr.start; }
+    if (moving && S.rec) {
+      const last = S.rec.samples[S.rec.samples.length - 1];
+      if (!last || t > last.t + 1e-4) S.rec.samples.push({ t, ...S.rec.view });
+      if (tr.end > 0 && t >= tr.end) stopRecording();
+    } else if (moving && tr.end > 0 && t >= tr.end) { video.currentTime = tr.start; }
     if (S.videoReady) viewer.uploadFrame();
-    const v = currentView(t);
-    viewer.setView(v);
+    const views = Array.from({ length: tileCount() }, (_, i) => tileViewAt(i, t));
+    viewer.setView(views[0]);
+    viewer.setProjection(S.st.projection);
+    viewer.setLayout(S.st.multi.layout, S.st.multi.gap, views.slice(1).map((v, j) => ({
+      projection: tileData(j + 1).projection, view: v, matrix: yprToMatrix(v.yaw, v.pitch, v.roll),
+    })));
     viewer.setStabMatrix(stabMatrix(t));
-    viewer.draw(yprToMatrix(v.yaw, v.pitch, v.roll));
+    viewer.draw(yprToMatrix(views[0].yaw, views[0].pitch, views[0].roll));
+    updateTileOutline();
+    if (tileCount() > 1 && performance.now() - S.listAt > 300 && $('#pane-views').classList.contains('active')) { S.listAt = performance.now(); renderTileList(); }
     updateTimeUI();
     syncViewControls();
     S.dirty = false;
@@ -178,6 +217,7 @@ function pausedTime() {
 // horodatage, un arrondi (WebM : 1 ms ; 29,97 i/s : l'horodatage n'est jamais exact) ou le décalage de +7 ms que
 // FFmpeg 4.4 (Ubuntu 22.04) donne à la piste vidéo feraient afficher l'image précédente.
 function seek(t) {
+  if (S.rec) stopRecording();
   const k = Math.min(Math.max(0, Math.round(t * S.fps)), lastFrame());
   video.currentTime = (k + 0.5) / S.fps;
   S.dirty = true;
@@ -195,12 +235,18 @@ async function openProject(path) {
 
 function adoptProject(p) {
   S.proj = p; S.st = p.state; S.dur = p.source.duration; S.fps = p.source.fps; S.override = null;
+  S.tile = 0; S.selKf = -1; S.rec = null; S.recUndo = null; S.pick = false; S.tracking = null;
+  S.st.multi = multiWithDefaults(S.st.multi);
   S.videoReady = false;
   const src = p.source, [w, h] = src.lens_size;
   const dims = src.layout === 'equirect' ? `${w}×${h}` : `2 × ${w}×${h}`;
   $('#file-info').textContent = `${p.name} — ${dims} · ${src.fps.toFixed(2).replace(/\.?0+$/, '')} fps · ${fmtTime(src.duration)}${src.has_trailer ? ' · métadonnées Insta360' : ''}`;
   $('#file-info').title = src.path;
   viewer && viewer.setCalibration(S.st.calibration);
+  S.st.grade = gradeWithDefaults(S.st.grade);
+  viewer && viewer.setGrade(S.st.grade);
+  S.st.stick = stickWithDefaults(S.st.stick);
+  viewer && viewer.setStick(S.st.stick);
   setProjectionUI();
   bindStateToControls();
   renderKeyframes();
@@ -226,6 +272,7 @@ function loadVideoIfReady() {
 }
 video.addEventListener('loadeddata', () => { S.videoReady = true; S.dirty = true; seek(Math.max(0, S.st.trim.start)); });
 video.addEventListener('seeked', () => { S.dirty = true; });
+video.addEventListener('ended', () => { if (S.rec) stopRecording(); });
 video.addEventListener('timeupdate', () => { if (video.paused) S.dirty = true; });
 // L'aperçu ne se lit pas : dire pourquoi (navigateur sans VP9, serveur qui refuse le fichier, fichier illisible)
 // plutôt que d'accuser le VP9 dans tous les cas.
@@ -255,6 +302,7 @@ async function playbackErrorMessage(src, detail) {
 $('#btn-play').addEventListener('click', togglePlay);
 function togglePlay() {
   if (!S.videoReady) return;
+  if (S.rec) { stopRecording(); return; }
   if (video.paused) {
     const tr = S.st.trim;
     if (tr.end > 0 && video.currentTime >= tr.end) video.currentTime = tr.start;
@@ -297,7 +345,7 @@ function setTrim(which) {
 function renderKeyframes() {
   const layer = $('#kf-layer'), list = $('#kf-list');
   layer.textContent = ''; list.textContent = '';
-  const kfs = S.st ? S.st.keyframes : [];
+  const kfs = S.st ? tileData().keyframes : [];
   $('#kf-empty').hidden = kfs.length > 0;
   kfs.forEach((k, i) => {
     const m = document.createElement('div');
@@ -311,18 +359,18 @@ function renderKeyframes() {
       if (!m._drag) return;
       k.t = timeFromEvent(e); m.style.left = (k.t / S.dur) * 100 + '%'; seek(k.t);
     });
-    m.addEventListener('pointerup', () => { m._drag = false; S.st.keyframes.sort((a, b) => a.t - b.t); scheduleSave('keyframes'); renderKeyframes(); });
+    m.addEventListener('pointerup', () => { m._drag = false; kfs.sort((a, b) => a.t - b.t); saveTile('keyframes'); renderKeyframes(); });
     layer.appendChild(m);
 
     const li = document.createElement('li');
     if (i === S.selKf) li.className = 'sel';
     const info = document.createElement('div');
     const t = document.createElement('span'); t.className = 't'; t.textContent = fmtTime(k.t);
-    info.append(t, ` — cap ${k.yaw.toFixed(0)}° · incl. ${k.pitch.toFixed(0)}° · champ ${k.fov.toFixed(0)}°`);
+    info.append(t, ` — cap ${k.yaw.toFixed(0)}° · incl. ${k.pitch.toFixed(0)}° · champ ${k.fov.toFixed(0)}°` + (k.distortion > 0.005 ? ` · dist. ${k.distortion.toFixed(2)}` : ''));
     const act = document.createElement('div'); act.className = 'actions';
     const bGo = btn('Aller', () => { S.selKf = i; seek(k.t); renderKeyframes(); });
-    const bUp = btn('Mettre à jour', () => { const v = currentView(S.t); Object.assign(k, v, { t: k.t }); scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }, 'Remplace ce keyframe par la vue affichée');
-    const bDel = btn('✕', () => { S.st.keyframes.splice(i, 1); S.selKf = -1; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }, 'Supprimer');
+    const bUp = btn('Mettre à jour', () => { const v = currentView(S.t); Object.assign(k, v, { t: k.t }); saveTile('keyframes'); renderKeyframes(); S.dirty = true; }, 'Remplace ce keyframe par la vue affichée');
+    const bDel = btn('✕', () => { kfs.splice(i, 1); S.selKf = -1; saveTile('keyframes'); renderKeyframes(); S.dirty = true; }, 'Supprimer');
     act.append(bGo, bUp, bDel);
     li.append(info, act);
     list.appendChild(li);
@@ -337,23 +385,159 @@ function btn(label, fn, title) {
 function addKeyframe() {
   if (!S.st) return;
   const v = { ...currentView(S.t) };
-  const kfs = S.st.keyframes;
+  const kfs = tileData().keyframes;
   const i = kfs.findIndex((k) => Math.abs(k.t - S.t) <= 1.5 / S.fps);
   const kf = { t: S.t, ...v };
   if (i >= 0) { kfs[i] = kf; S.selKf = i; } else { kfs.push(kf); kfs.sort((a, b) => a.t - b.t); S.selKf = kfs.indexOf(kf); }
-  S.override = null; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true;
+  S.override = null; saveTile('keyframes'); renderKeyframes(); S.dirty = true;
 }
 $('#btn-kf').addEventListener('click', addKeyframe);
 $('#btn-kf-clear').addEventListener('click', () => {
-  if (!S.st || !S.st.keyframes.length) return;
-  if (confirm('Supprimer tous les keyframes ?')) { S.st.keyframes = []; S.selKf = -1; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }
+  if (!S.st || !tileData().keyframes.length) return;
+  if (confirm('Supprimer tous les keyframes ?')) { tileData().keyframes = []; S.selKf = -1; saveTile('keyframes'); renderKeyframes(); S.dirty = true; }
 });
+
+// ---------------------------------------------------------------- enregistrement du cadrage
+// On lit la vidéo et on oriente la vue à la souris : à l'arrêt, le tracé devient des keyframes (linéaires) qui
+// remplacent ceux de la plage enregistrée, pour la vue sélectionnée.
+function startRecording() {
+  if (!S.videoReady || !S.st) return;
+  if (S.pick) setPick(false);
+  const tr = S.st.trim;
+  if (tr.end > 0 && video.currentTime >= tr.end - 0.05) video.currentTime = tr.start;
+  const rate = parseFloat($('#rec-speed').value) || 1;
+  const view = clampView({ distortion: 0, ...currentView(S.t) });
+  S.rec = { tile: S.tile, view, samples: [{ t: video.currentTime || 0, ...view }], rate };
+  S.override = null;
+  video.playbackRate = rate;
+  video.muted = true;
+  video.play().catch(() => stopRecording());
+  updateRecUI(); S.dirty = true;
+}
+function stopRecording() {
+  const rec = S.rec;
+  if (!rec) return;
+  S.rec = null;
+  video.pause();
+  video.playbackRate = 1;
+  const keyframes = simplifySamples(rec.samples);
+  if (keyframes.length >= 2) {
+    const d = tileData(rec.tile);
+    S.recUndo = { tile: rec.tile, keyframes: d.keyframes.map((k) => ({ ...k })) };
+    d.keyframes = replaceKeyframes(d.keyframes, keyframes, keyframes[0].t, keyframes[keyframes.length - 1].t);
+    d.view = { ...d.view, ...rec.view };
+    if (S.tile === rec.tile) S.selKf = -1;
+    if (S.tile === 0) scheduleSave('keyframes', 'view'); else scheduleSave('multi');
+    toast(`Cadrage enregistré : ${keyframes.length} keyframes de ${fmtTime(keyframes[0].t)} à ${fmtTime(keyframes[keyframes.length - 1].t)}.`);
+  } else {
+    toast('Rien à enregistrer : lancez l\'enregistrement puis orientez la vue pendant la lecture.', true);
+  }
+  S.override = null;
+  renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+}
+function undoRecording() {
+  const u = S.recUndo;
+  if (!u || !S.st) return;
+  tileData(u.tile).keyframes = u.keyframes;
+  S.recUndo = null;
+  if (u.tile === 0) scheduleSave('keyframes'); else scheduleSave('multi');
+  S.override = null; S.selKf = -1;
+  renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+}
+function updateRecUI() {
+  const on = !!S.rec;
+  const b = $('#btn-rec');
+  b.textContent = on ? '■ Arrêter' : '● Cadrage';
+  b.classList.toggle('rec', on);
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  $('#hud-rec').hidden = !on;
+  $('#btn-rec-undo').hidden = !S.recUndo;
+}
+$('#btn-rec').addEventListener('click', () => (S.rec ? stopRecording() : startRecording()));
+$('#btn-rec-undo').addEventListener('click', undoRecording);
+
+// ---------------------------------------------------------------- suivi de sujet
+const trackStatus = (text, warn = false) => {
+  const box = $('#track-status');
+  box.hidden = !text; box.textContent = text || '';
+  box.className = 'status-box' + (warn ? ' warn' : '');
+};
+function setPick(on) {
+  S.pick = on && !!S.st && !S.tracking && !S.rec;
+  $('#btn-track').setAttribute('aria-pressed', S.pick ? 'true' : 'false');
+  $('#btn-track').classList.toggle('rec', S.pick);
+  $('#btn-track').textContent = S.pick ? '✕ Annuler la désignation' : '⌖ Désigner un sujet à suivre';
+  canvas.style.cursor = S.pick ? 'crosshair' : '';
+  if (S.pick) { video.pause(); trackStatus('Cliquez sur le sujet dans l\'aperçu.'); } else if (!S.tracking) trackStatus('');
+}
+// Direction (repère de la vue) du point cliqué : on remonte la projection de la vue sous le pointeur.
+function pointedDirection(e) {
+  const r = canvas.getBoundingClientRect();
+  const rect = layoutRects(S.st.multi.layout, r.width, r.height, S.st.multi.gap)[S.tile];
+  const x = e.clientX - r.left - rect.x, y = e.clientY - r.top - rect.y;
+  const v = currentView(S.t), d = tileData();
+  const ray = outputRay(d.projection, 2 * x / rect.w - 1, 1 - 2 * y / rect.h, v.fov * Math.PI / 180, rect.h / rect.w, d.projection === 'flat' ? v.distortion || 0 : 0);
+  const m = yprToMatrix(v.yaw, v.pitch, v.roll);
+  return dirToYawPitch([0, 1, 2].map((i) => m[i * 3] * ray[0] + m[i * 3 + 1] * ray[1] + m[i * 3 + 2] * ray[2]));
+}
+async function pickSubject(e) {
+  const [yaw, pitch] = pointedDirection(e);
+  setPick(false);
+  const tr = S.st.trim;
+  trackStatus('Suivi en cours…');
+  try {
+    await flushSave();
+    const job = await api('POST', `/api/project/${S.proj.id}/track`, {
+      t: S.t, yaw, pitch, size: +$('#t-size').value, backward: $('#t-back').checked,
+      start: tr.start, end: tr.end > 0 ? tr.end : S.dur,
+    });
+    S.tracking = { job: job.id, tile: S.tile };
+    S.jobs.push({ id: job.id, state: job.state });   // une tâche très courte doit quand même être vue passer à « terminé »
+    refreshJobs();
+  } catch (err) { trackStatus(''); toast(err.message, true); }
+}
+// Le suivi est terminé : ses keyframes (cap et inclinaison) remplacent ceux de la plage suivie ; le champ, le roulis et la
+// distorsion gardent leurs valeurs d'avant.
+async function applyTrack(job) {
+  const tracking = S.tracking;
+  S.tracking = null;
+  try {
+    const r = await api('GET', `/api/project/${S.proj.id}/track`);
+    if (r.job !== job.id || !r.keyframes || r.keyframes.length < 2) throw new Error('Le suivi n\'a rien donné.');
+    const d = tileData(tracking.tile), old = d.keyframes;
+    const fresh = r.keyframes.map((k) => ({ ...interpolateView(old, k.t, d.view), ...k }));
+    S.recUndo = { tile: tracking.tile, keyframes: old.map((k) => ({ ...k })) };
+    d.keyframes = replaceKeyframes(old, fresh, fresh[0].t, fresh[fresh.length - 1].t);
+    if (tracking.tile === 0) scheduleSave('keyframes'); else scheduleSave('multi');
+    S.override = null; S.selKf = -1;
+    const lost = [r.track.lost_before != null && `avant ${fmtTime(r.track.lost_before)}`, r.track.lost_after != null && `à partir de ${fmtTime(r.track.lost_after)}`].filter(Boolean);
+    const msg = `Sujet suivi de ${fmtTime(fresh[0].t)} à ${fmtTime(fresh[fresh.length - 1].t)} : ${fresh.length} keyframes.`;
+    trackStatus(lost.length ? `${msg} Sujet perdu ${lost.join(' et ')}.` : msg, lost.length > 0);
+    toast(msg);
+    renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+  } catch (err) { trackStatus(''); toast(err.message, true); }
+}
+$('#btn-track').addEventListener('click', () => setPick(!S.pick));
+$('#t-size').addEventListener('input', (e) => { e.target.parentElement.querySelector('output').textContent = `${e.target.value}°`; });
+$('#t-size').parentElement.querySelector('output').textContent = `${$('#t-size').value}°`;
 
 // ---------------------------------------------------------------- interaction avec l'image
 const canvas = $('#gl');
 let drag = null;
+// Vue sous le pointeur (la dernière rencontrée : une incrustation recouvre la vue principale).
+function tileAtPointer(e) {
+  const n = tileCount();
+  if (n === 1) return 0;
+  const r = canvas.getBoundingClientRect();
+  const rects = layoutRects(S.st.multi.layout, r.width, r.height, S.st.multi.gap);
+  let hit = -1;
+  rects.forEach((q, i) => { if (e.clientX - r.left >= q.x && e.clientX - r.left < q.x + q.w && e.clientY - r.top >= q.y && e.clientY - r.top < q.y + q.h) hit = i; });
+  return hit < 0 ? S.tile : hit;
+}
 canvas.addEventListener('pointerdown', (e) => {
   if (!S.st) return;
+  selectTile(tileAtPointer(e));
+  if (S.pick) { e.preventDefault(); pickSubject(e); return; }
   canvas.setPointerCapture(e.pointerId);
   drag = { x: e.clientX, y: e.clientY };
   canvas.classList.add('dragging');
@@ -363,7 +547,7 @@ canvas.addEventListener('pointermove', (e) => {
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   drag = { x: e.clientX, y: e.clientY };
   editView((v) => {
-    const k = v.fov / canvas.clientWidth * (projection() === 'planet' ? 0.6 : 1);
+    const k = v.fov / canvas.clientWidth * (projection() === 'planet' ? 0.6 : 1 - 0.4 * Math.min(1, v.distortion || 0));
     v.yaw -= dx * k; v.pitch += dy * k;
     return v;
   });
@@ -374,27 +558,126 @@ canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('wheel', (e) => {
   if (!S.st) return;
   e.preventDefault();
+  selectTile(tileAtPointer(e));
   editView((v) => { v.fov *= Math.exp(e.deltaY * 0.0012); return v; });
 }, { passive: false });
-canvas.addEventListener('dblclick', resetView);
+canvas.addEventListener('dblclick', (e) => { selectTile(tileAtPointer(e)); resetView(); });
 $('#btn-reset-view').addEventListener('click', resetView);
 function resetView() {
-  editView((v) => ({ ...v, yaw: 0, pitch: 0, roll: 0, fov: DEFAULT_FOV[projection()] }));
+  editView((v) => ({ ...v, yaw: 0, pitch: 0, roll: 0, fov: DEFAULT_FOV[projection()], distortion: 0 }));
 }
 for (const [k, sel] of Object.entries(VIEW_CTRL)) {
   $(sel).addEventListener('input', (e) => editView((v) => { v[k] = parseFloat(e.target.value); return v; }));
 }
-$('#proj').addEventListener('change', (e) => {
-  if (!S.st) return;
-  S.st.projection = e.target.value;
-  S.st.view.fov = DEFAULT_FOV[S.st.projection];
-  if (S.st.projection === 'planet') S.st.view.pitch = -90;
-  else if (S.st.view.pitch === -90) S.st.view.pitch = 0;
+function setProjection(p) {
+  if (S.rec) { setProjectionUI(); return; }   // la projection de la vue filmée ne change pas pendant l'enregistrement
+  const d = tileData();
+  d.projection = p;
+  d.view.fov = DEFAULT_FOV[p];
+  d.view.distortion = 0;
+  if (p === 'planet') d.view.pitch = -90;
+  else if (d.view.pitch === -90) d.view.pitch = 0;
   S.override = null;
   setProjectionUI();
-  S.st.keyframes.forEach((k) => { k.fov = Math.min(FOV_RANGE[S.st.projection][1], Math.max(FOV_RANGE[S.st.projection][0], k.fov)); });
-  scheduleSave('projection', 'view', 'keyframes'); renderKeyframes(); S.dirty = true; updateExportSummary();
+  d.keyframes.forEach((k) => {
+    const [lo, hi] = fovRange(p, k.distortion || 0);
+    k.fov = Math.min(hi, Math.max(lo, k.fov));
+    if (p !== 'flat') k.distortion = 0;
+  });
+  saveTile('projection', 'view', 'keyframes'); renderKeyframes(); renderTileList(); S.dirty = true; updateExportSummary();
+}
+$('#proj').addEventListener('change', (e) => { if (S.st) setProjection(e.target.value); });
+
+// Préréglages de perspective : champ + distorsion (+ inclinaison pour la planète) ; le fisheye est une autre projection.
+const PRESETS = {
+  lineaire: { projection: 'flat', fov: 80, distortion: 0 },
+  naturel: { projection: 'flat', fov: 100, distortion: 0.3 },
+  large: { projection: 'flat', fov: 130, distortion: 0.55 },
+  ultra: { projection: 'flat', fov: 170, distortion: 0.8 },
+  fisheye: { projection: 'fisheye', fov: 180, distortion: 0 },
+  planete: { projection: 'flat', fov: 250, distortion: 1, pitch: -90 },
+};
+function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!S.st || !p) return;
+  if (p.projection !== projection()) {
+    if (S.rec) return;
+    setProjection(p.projection);
+  }
+  const { projection: _, ...fields } = p;
+  editView((v) => ({ ...v, ...fields }));
+}
+$$('#v-presets [data-preset]').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+
+// ---------------------------------------------------------------- plusieurs perspectives
+const LAYOUT_NAMES = { single: 'une vue', side: 'côte à côte', stack: 'haut / bas', pip: 'incrustation', trio: 'une grande et deux petites', quad: 'quatre vues' };
+const PROJECTION_NAMES = { flat: 'plat', fisheye: 'fisheye', planet: 'planète' };
+
+// Complète les vues manquantes de la disposition courante (la disposition peut grandir sans que l'utilisateur les ait créées).
+function ensureTiles() {
+  S.st.multi = multiWithDefaults(S.st.multi);
+  if (S.tile >= tileCount()) S.tile = 0;
+}
+function selectTile(i) {
+  if (!S.st || S.rec || i === S.tile || i >= tileCount()) return;   // pendant l'enregistrement, la vue filmée reste la même
+  S.tile = i; S.override = null; S.selKf = -1;
+  setProjectionUI(); renderKeyframes(); renderTileList(); syncViewControls(); S.dirty = true;
+}
+function renderTileList() {
+  if (!S.st) return;
+  const list = $('#tile-list'); list.textContent = '';
+  for (let i = 0; i < tileCount(); i++) {
+    const d = tileData(i), v = interpolateView(d.keyframes, S.t, d.view);
+    const li = document.createElement('li');
+    if (i === S.tile) li.className = 'sel';
+    const info = document.createElement('div');
+    const name = document.createElement('span'); name.className = 't'; name.textContent = `Vue ${i + 1}`;
+    info.append(name, ` — ${PROJECTION_NAMES[d.projection]} · cap ${v.yaw.toFixed(0)}° · champ ${v.fov.toFixed(0)}°` + (d.keyframes.length ? ` · ${d.keyframes.length} keyframe(s)` : ''));
+    const act = document.createElement('div'); act.className = 'actions';
+    act.append(btn(i === S.tile ? 'Modifiée' : 'Modifier', () => selectTile(i), 'Les réglages du panneau Recadrage et les keyframes s\'appliquent à cette vue'));
+    li.append(info, act);
+    list.appendChild(li);
+  }
+  $('#views-active').textContent = tileCount() > 1 ? `vue ${S.tile + 1} sur ${tileCount()}` : '';
+}
+function syncLayoutControls() {
+  const m = S.st.multi;
+  $('#m-layout').value = m.layout;
+  $('#f-m-gap').hidden = m.layout === 'single' || m.layout === 'pip';
+  if (document.activeElement !== $('#m-gap')) $('#m-gap').value = m.gap;
+  $('#m-gap').parentElement.querySelector('output').textContent = `${m.gap} px`;
+  renderTileList();
+}
+// Une vue que l'utilisateur n'a pas touchée : celle que la disposition propose par défaut.
+function isUntouchedTile(v, index, count) {
+  const d = defaultTileView(index, count);
+  return v.projection === d.projection && !v.keyframes.length && ['yaw', 'pitch', 'roll', 'fov', 'distortion'].every((k) => (v.view[k] || 0) === d.view[k]);
+}
+function setLayout(layout) {
+  if (S.rec) { syncLayoutControls(); return; }   // la disposition ne change pas pendant l'enregistrement
+  // les vues pas encore modifiées se répartissent à nouveau sur le tour selon le nombre de vues de la nouvelle disposition
+  const oldCount = tileCount(), newCount = LAYOUT_TILES[layout] || 1;
+  S.st.multi.views.forEach((v, j) => { if (isUntouchedTile(v, j + 1, oldCount)) S.st.multi.views[j] = defaultTileView(j + 1, newCount); });
+  S.st.multi.layout = layout;
+  ensureTiles(); syncLayoutControls(); setProjectionUI(); renderKeyframes(); updateTileOutline();
+  scheduleSave('multi'); S.dirty = true; updateExportSummary();
+}
+$('#m-layout').addEventListener('change', (e) => { if (S.st) setLayout(e.target.value); });
+$('#m-gap').addEventListener('input', (e) => {
+  if (!S.st) return;
+  S.st.multi.gap = Math.round(parseFloat(e.target.value) / 4) * 4;
+  syncLayoutControls(); scheduleSave('multi'); S.dirty = true;
 });
+// Cadre de la vue en cours de modification, par-dessus l'aperçu (seulement s'il y en a plusieurs).
+function updateTileOutline() {
+  const box = $('#tile-outline');
+  if (!S.st || tileCount() < 2) { box.hidden = true; return; }
+  const k = canvas.clientWidth / canvas.width;
+  const r = layoutRects(S.st.multi.layout, canvas.width, canvas.height, S.st.multi.gap)[S.tile];
+  if (!r) { box.hidden = true; return; }
+  box.hidden = false;
+  box.style.cssText = `left:${r.x * k}px;top:${r.y * k}px;width:${r.w * k}px;height:${r.h * k}px`;
+}
 
 // ---------------------------------------------------------------- panneau : onglets
 $$('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
@@ -416,6 +699,9 @@ function bindStateToControls() {
     if (!el) continue;
     if (el.type === 'checkbox') el.checked = !!c[k]; else setOut('#c-' + k, c[k], '°');
   }
+  for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
+  syncStickControls();
+  syncLayoutControls();
   updateAnalysisStatus();
 }
 function setOut(sel, v, unit) {
@@ -449,10 +735,14 @@ $('#btn-center-here').addEventListener('click', () => {
   // la vue actuelle devient « l'avant » : on décale l'orientation du cap affiché
   const v = currentView(S.t);
   S.st.orientation.yaw = wrap180(S.st.orientation.yaw + v.yaw);
-  S.st.view.yaw = 0;
-  S.st.keyframes.forEach((k) => { k.yaw = wrap180(k.yaw - v.yaw); });
+  // toutes les vues suivent le recentrage ; la vue affichée devient « l'avant »
+  for (let i = 0; i < tileCount(); i++) {
+    const d = tileData(i);
+    d.view.yaw = i === S.tile ? 0 : wrap180(d.view.yaw - v.yaw);
+    d.keyframes.forEach((k) => { k.yaw = wrap180(k.yaw - v.yaw); });
+  }
   S.override = null;
-  bindStateToControls(); scheduleSave('orientation', 'view', 'keyframes'); renderKeyframes(); fetchStab();
+  bindStateToControls(); scheduleSave('orientation', 'view', 'keyframes', 'multi'); renderKeyframes(); fetchStab();
 });
 $('#btn-analyze').addEventListener('click', async () => {
   try { await api('POST', `/api/project/${S.proj.id}/analyze`, {}); selectTab('jobs'); refreshJobs(); } catch (e) { toast(e.message, true); }
@@ -469,6 +759,60 @@ function updateAnalysisStatus() {
   if (quality === 'faible') box.classList.add('warn');
   box.textContent = `Analyse prête : ${a.frames} images, ${a.median_inliers} points suivis en moyenne (fiabilité ${quality}).` + (a.weak_frames ? ` ${a.weak_frames} images peu fiables.` : '');
 }
+
+// ---------------------------------------------------------------- réglages d'image
+const GRADE_FMT = {
+  brightness: (v) => (v > 0 ? '+' : '') + v.toFixed(2), warmth: (v) => (v > 0 ? '+' : '') + v.toFixed(2),
+  tint: (v) => (v > 0 ? '+' : '') + v.toFixed(2),
+  contrast: (v) => '×' + v.toFixed(2), saturation: (v) => '×' + v.toFixed(2), gamma: (v) => v.toFixed(2),
+  sharpen: (v) => v.toFixed(2), denoise: (v) => v.toFixed(2),
+};
+function setGradeControl(k) {
+  const el = $('#g-' + k), v = S.st.grade[k];
+  if (document.activeElement !== el) el.value = v;
+  el.parentElement.querySelector('output').textContent = GRADE_FMT[k](+v);
+}
+for (const k of Object.keys(GRADE_DEFAULT)) {
+  $('#g-' + k).addEventListener('input', (e) => {
+    if (!S.st) return;
+    S.st.grade[k] = parseFloat(e.target.value);
+    setGradeControl(k); viewer && viewer.setGrade(S.st.grade); S.dirty = true; scheduleSave('grade');
+  });
+}
+$('#btn-grade-reset').addEventListener('click', () => {
+  if (!S.st) return;
+  S.st.grade = { ...GRADE_DEFAULT };
+  for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
+  viewer && viewer.setGrade(S.st.grade); S.dirty = true; scheduleSave('grade');
+});
+
+// ---------------------------------------------------------------- perche à selfie / nadir
+function syncStickControls() {
+  const k = S.st.stick;
+  $('#k-mode').value = k.mode;
+  for (const [id, key, unit] of [['#k-radius', 'radius', '°'], ['#k-yaw', 'yaw', '°'], ['#k-pitch', 'pitch', '°']]) {
+    if (document.activeElement !== $(id)) $(id).value = k[key];
+    $(id).parentElement.querySelector('output').textContent = `${(+k[key]).toFixed(1)}${unit}`;
+  }
+  if (document.activeElement !== $('#k-softness')) $('#k-softness').value = k.softness;
+  $('#k-softness').parentElement.querySelector('output').textContent = (+k.softness).toFixed(2);
+  $('#k-color').value = k.color;
+  $('#f-k-soft').hidden = $('#f-k-color').hidden = k.mode !== 'cover';
+  $('#k-radius').disabled = k.mode === 'off';
+}
+function editStick(patch) {
+  if (!S.st) return;
+  S.st.stick = { ...S.st.stick, ...patch };
+  syncStickControls(); viewer && viewer.setStick(S.st.stick); S.dirty = true; scheduleSave('stick');
+}
+$('#k-mode').addEventListener('change', (e) => editStick({ mode: e.target.value }));
+for (const [id, key] of [['#k-radius', 'radius'], ['#k-softness', 'softness'], ['#k-yaw', 'yaw'], ['#k-pitch', 'pitch']]) {
+  $(id).addEventListener('input', (e) => editStick({ [key]: parseFloat(e.target.value) }));
+}
+$('#k-color').addEventListener('input', (e) => editStick({ color: e.target.value }));
+$('#btn-stick-axis-reset').addEventListener('click', () => editStick({ yaw: STICK_DEFAULT.yaw, pitch: STICK_DEFAULT.pitch }));
+$('#k-show').addEventListener('change', (e) => { if (viewer) viewer.showStick = e.target.checked; S.dirty = true; });
+$('#btn-look-nadir').addEventListener('click', () => applyPreset('planete'));
 
 // ---------------------------------------------------------------- objectifs (calibration)
 for (const k of ['fov', 'blend', 'a_yaw', 'a_pitch', 'a_roll', 'b_yaw', 'b_pitch', 'b_roll']) {
@@ -504,7 +848,7 @@ function exportSettings() {
   const mode = $('#e-mode').value;
   const s = {
     mode, fps: +$('#e-fps').value, speed: +$('#e-speed').value, codec: $('#e-codec').value, crf: +$('#e-crf').value,
-    audio: $('#e-audio').checked, projection: projection(),
+    audio: $('#e-audio').checked, projection: S.st.projection,
   };
   if (mode === 'reframe') { const [w, h] = $('#e-size').value.split('x').map(Number); s.width = w; s.height = h; }
   else s.stitch_width = +$('#e-size360').value;
@@ -521,7 +865,10 @@ function updateExportSummary() {
   const b = document.createElement('b'); b.textContent = `${fmtTime(tr.start)} → ${fmtTime(end)}`;
   box.append('Plage exportée : ', b, ` (${(dur / sp).toFixed(1)} s en sortie)`);
   box.append(document.createElement('br'), `Stabilisation : ${({ off: 'désactivée', smooth: 'lissage', lock: 'verrouillage', horizon: 'horizon' })[stab]} · ${S.st.keyframes.length} keyframe(s)`);
-  if ($('#e-mode').value === 'reframe') box.append(document.createElement('br'), `Projection : ${({ flat: 'plate', fisheye: 'fisheye', planet: 'petite planète' })[projection()]}`);
+  if ($('#e-mode').value === 'reframe') {
+    box.append(document.createElement('br'), `Projection : ${({ flat: 'plate', fisheye: 'fisheye', planet: 'petite planète' })[S.st.projection]}`);
+    if (tileCount() > 1) box.append(document.createElement('br'), `Disposition : ${LAYOUT_NAMES[S.st.multi.layout]} (${tileCount()} vues)`);
+  }
 }
 $$('#pane-export select, #pane-export input').forEach((el) => el.addEventListener('change', updateExportSummary));
 $('#btn-export').addEventListener('click', async () => {
@@ -538,7 +885,7 @@ $('#btn-snap').addEventListener('click', async () => {
   try {
     const mode = 'reframe';
     const sz = $('#e-size').value.split('x').map(Number);
-    const r = await api('POST', `/api/project/${S.proj.id}/snapshot`, { t: S.t, settings: { mode, width: sz[0], height: sz[1], projection: projection() }, directory: $('#e-dir').value.trim() || undefined });
+    const r = await api('POST', `/api/project/${S.proj.id}/snapshot`, { t: S.t, settings: { mode, width: sz[0], height: sz[1], projection: S.st.projection }, directory: $('#e-dir').value.trim() || undefined });
     toast('Image enregistrée : ' + r.path);
   } catch (e) { toast(e.message, true); }
 });
@@ -574,6 +921,7 @@ async function refreshJobs() {
       const meta = document.createElement('div'); meta.className = 'meta err'; meta.textContent = j.error; li.appendChild(meta);
     }
     list.appendChild(li);
+    if (S.tracking && j.id === S.tracking.job && j.state === 'running') trackStatus(`Suivi en cours… ${Math.round(j.progress * 100)} %`);
     if (prev.get(j.id) && prev.get(j.id) !== j.state) onJobChange(j);
   }
   clearTimeout(jobTimer);
@@ -581,7 +929,11 @@ async function refreshJobs() {
 }
 async function onJobChange(j) {
   if (j.state === 'done' && j.kind === 'export') toast('Export terminé : ' + j.output);
-  if (j.state === 'error') toast(`${j.title} : échec`, true);
+  if (j.state === 'error') toast(j.kind === 'track' && j.error ? j.error : `${j.title} : échec`, true);
+  if (S.tracking && j.id === S.tracking.job) {
+    if (j.state === 'done') applyTrack(j);
+    else if (j.state === 'error' || j.state === 'cancelled') { S.tracking = null; trackStatus(j.state === 'error' ? j.error : 'Suivi annulé.', true); }
+  }
   if (!S.proj || j.project_id !== S.proj.id) return;
   if (j.state === 'done' && (j.kind === 'proxy' || j.kind === 'analyze')) {
     const p = await api('GET', `/api/project/${S.proj.id}`);
@@ -619,7 +971,7 @@ async function fsLoad(path) {
 $('#fs-up').addEventListener('click', (e) => fsLoad(e.currentTarget.dataset.path));
 $('#fs-go').addEventListener('click', () => {
   const v = $('#fs-path').value.trim();
-  if (/\.(insv|mp4|mov|mkv|webm|m4v)$/i.test(v)) openProject(v); else fsLoad(v);
+  if (/\.(insv|lrv|mp4|mov|mkv|webm|m4v)$/i.test(v)) openProject(v); else fsLoad(v);
 });
 $('#fs-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#fs-go').click(); } });
 $('#btn-help').addEventListener('click', () => $('#dlg-help').showModal());
@@ -633,6 +985,8 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowLeft') { e.preventDefault(); seek(S.t - (e.shiftKey ? 1 : 1 / S.fps)); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); seek(S.t + (e.shiftKey ? 1 : 1 / S.fps)); }
   else if (e.key === 'k' || e.key === 'K') addKeyframe();
+  else if (e.key === 'r' || e.key === 'R') { if (S.rec) stopRecording(); else startRecording(); }
+  else if (e.key === 'Escape' && S.pick) setPick(false);
   else if (e.key === 'i' || e.key === 'I') setTrim('start');
   else if (e.key === 'o' || e.key === 'O') setTrim('end');
 });

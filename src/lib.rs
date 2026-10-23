@@ -10,14 +10,18 @@ pub mod calibration;
 pub mod cli;
 pub mod error;
 pub mod geometry;
+pub mod grade;
 pub mod jobs;
 pub mod media;
+pub mod multi;
 pub mod pipeline;
 pub mod project;
 pub mod render;
 pub mod server;
 pub mod spherical;
 pub mod stabilize;
+pub mod stick;
 pub mod synth;
+pub mod tracker;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

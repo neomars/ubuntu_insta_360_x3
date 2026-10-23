@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, startApp } from './helpers.mjs';
+import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, spriteFraction, startApp, waitFor } from './helpers.mjs';
+
+/** Attend la fin d'un enregistrement du cadrage (arrêt automatique en fin de plage). */
+const waitForRecEnd = (page) => waitFor(page, () => window.__x3.S.rec === null, { timeout: 15000 });
 
 describe('interface X3 Studio Local', () => {
   let app, browser, clip;
@@ -62,6 +65,9 @@ describe('interface X3 Studio Local', () => {
         ['flat', { yaw: -120, pitch: -20, roll: 0, fov: 110 }, 'off', 0.4, {}],
         ['fisheye', { yaw: 10, pitch: 0, roll: 0, fov: 200 }, 'smooth', 0.5, {}],
         ['planet', { yaw: 0, pitch: -90, roll: 0, fov: 250 }, 'off', 1.5, {}],
+        // perspective à distorsion : grand angle, puis petite planète « animable » (distorsion 1)
+        ['flat', { yaw: 20, pitch: 5, roll: 0, fov: 130, distortion: 0.55 }, 'off', 0.6, {}],
+        ['flat', { yaw: 0, pitch: -90, roll: 0, fov: 250, distortion: 1 }, 'off', 0.6, {}],
         // calibration des objectifs non triviale (rotations fines, quart de tour, champ, fondu), vue sur la couture
         ['flat', { yaw: 90, pitch: 5, roll: 0, fov: 100 }, 'off', 0.8, { a_yaw: 3, a_pitch: -2, a_roll: 4, b_yaw: -5, b_pitch: 3, b_roll: 90, fov: 195, blend: 15 }],
         ['fisheye', { yaw: 180, pitch: 0, roll: 0, fov: 200 }, 'off', 0.8, { swap_lenses: true, b_roll: -20 }],
@@ -69,7 +75,8 @@ describe('interface X3 Studio Local', () => {
       for (const [proj, view, stab, t, calib] of cases) {
         await page.evaluate(async ([proj, view, stab, t, calib]) => {
           const X = window.__x3, S = X.S;
-          S.st.projection = proj; S.st.view = view; S.st.keyframes = []; S.st.stabilization.mode = stab; S.override = null;
+          // la distorsion est toujours explicite : le serveur fusionne les réglages, un champ absent garderait l'ancienne valeur
+          S.st.projection = proj; S.st.view = { distortion: 0, ...view }; S.st.keyframes = []; S.st.stabilization.mode = stab; S.override = null;
           S.st.calibration = { ...S.st.calibration, ...calib };
           X.viewer.setCalibration(S.st.calibration);
           X.viewer.setProjection(proj);
@@ -167,7 +174,7 @@ describe('interface X3 Studio Local', () => {
       await sleep(600);
       const before = await canvasThumb(page);
       await page.click('.tab[data-tab=lens]');
-      await page.click('summary');
+      await page.click('#pane-lens summary');
       await page.fill('#c-b_yaw', '8');
       await page.dispatchEvent('#c-b_yaw', 'input');
       await sleep(600);
@@ -342,6 +349,514 @@ describe('interface X3 Studio Local', () => {
         const { diff } = await previewVsExport(page);
         assert.ok(diff < 0.03, `image ${k} : l'aperçu montre une autre image que l'export (écart ${diff.toFixed(4)})`);
       }
+    });
+  });
+
+  it("distorsion et préréglages de perspective : curseur, préréglages, animation entre keyframes", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('distorsion'));
+      const state = () => page.evaluate(() => ({ ...window.__x3.S.st.view, projection: window.__x3.S.st.projection }));
+      const near = (a, b, eps, label) => assert.ok(Math.abs(a - b) <= eps, `${label} : ${a} au lieu de ${b}`);
+      // le curseur n'existe que pour la projection plate
+      assert.ok(await page.isVisible('#f-dist'));
+      await page.fill('#v-dist', '0.7');
+      await page.dispatchEvent('#v-dist', 'input');
+      near((await state()).distortion, 0.7, 1e-9, 'curseur de distorsion');
+      // préréglages
+      for (const [name, projection, fov, distortion, pitch] of [
+        ['large', 'flat', 130, 0.55, 0], ['ultra', 'flat', 170, 0.8, 0], ['planete', 'flat', 250, 1, -90],
+        ['fisheye', 'fisheye', 180, 0, 0], ['lineaire', 'flat', 80, 0, 0],
+      ]) {
+        await page.click(`[data-preset=${name}]`);
+        const v = await state();
+        assert.equal(v.projection, projection, name);
+        near(v.fov, fov, 0.5, `${name} : champ`); near(v.distortion, distortion, 1e-9, `${name} : distorsion`);
+        near(v.pitch, pitch, 0.5, `${name} : inclinaison`);
+        assert.equal(await page.isVisible('#f-dist'), projection === 'flat', `${name} : curseur de distorsion visible seulement en projection plate`);
+        await settle(page);
+        await sleep(300);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${name} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      }
+      // animation : du rectiligne (champ 90°) à la petite planète (champ 200°, distorsion 1) en une seconde
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
+        S.st.keyframes = [
+          { t: 0, yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 },
+          { t: 1, yaw: 0, pitch: 0, roll: 0, fov: 200, distortion: 1 },
+        ];
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes']) S.pending.add(k);
+        await X.flushSave();
+      });
+      for (const [t, fov, distortion] of [[0, 90, 0], [0.5, 145, 0.5], [1, 200, 1]]) {
+        await page.evaluate((t) => { const X = window.__x3; X.seek(t); X.S.dirty = true; }, t);
+        await settle(page);
+        await sleep(300);
+        const v = await page.evaluate('window.__x3.viewer.view');
+        near(v.fov, fov, 1.5, `t=${t} : champ`); near(v.distortion, distortion, 0.03, `t=${t} : distorsion`);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `t=${t} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      }
+    });
+  });
+
+  it("réglages d'image : curseurs, enregistrement, aperçu et export identiques", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('image'));
+      await page.click('.tab[data-tab=image]');
+      const set = (id, value) => page.evaluate(([id, value]) => {
+        const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true }));
+      }, [id, String(value)]);
+      const grade = () => page.evaluate('window.__x3.S.st.grade');
+      const neutral = { brightness: 0, contrast: 1, saturation: 1, gamma: 1, warmth: 0, tint: 0, sharpen: 0, denoise: 0 };
+      assert.deepEqual(await grade(), neutral);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 30, pitch: 10, roll: 0, fov: 90, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); X.seek(0.8); S.dirty = true;
+      });
+      await settle(page);
+      await sleep(400);
+      const plain = await canvasThumb(page);
+      const parity = async (label) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      await parity('sans réglage');
+      for (const [label, values] of [
+        ['luminosité et contraste', { brightness: 0.18, contrast: 1.4 }],
+        ['saturation forte', { saturation: 1.9, gamma: 1.3 }],
+        ['noir et blanc', { saturation: 0, contrast: 1.2 }],
+        ['chaleur et teinte', { warmth: 0.7, tint: -0.5, brightness: -0.1, gamma: 0.8 }],
+        ['tout à la fois', { brightness: 0.08, contrast: 1.25, saturation: 1.5, gamma: 1.15, warmth: -0.6, tint: 0.4 }],
+      ]) {
+        for (const k of Object.keys(neutral)) await set('g-' + k, neutral[k]);
+        for (const [k, v] of Object.entries(values)) await set('g-' + k, v);
+        const g = await grade();
+        for (const [k, v] of Object.entries({ ...neutral, ...values })) assert.ok(Math.abs(g[k] - v) < 1e-9, `${label} : ${k} = ${g[k]}`);
+        assert.match(await page.innerText('#pane-image .field:nth-of-type(1) output'), /^[+-]?\d\.\d\d$/);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const moved = meanAbsDiff(plain, await canvasThumb(page));
+        assert.ok(moved > 6, `${label} : l'aperçu doit changer (écart ${moved.toFixed(1)})`);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(label);
+      }
+      // enregistré sur disque, rouvert tel quel
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.ok(Math.abs(saved.grade.warmth + 0.6) < 1e-9 && Math.abs(saved.grade.contrast - 1.25) < 1e-9, JSON.stringify(saved.grade));
+      // le serveur refuse une valeur hors bornes et garde les réglages précédents
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { grade: { contrast: 9 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /contraste/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // netteté et bruit sont enregistrés (effet à l'export seulement)
+      await set('g-sharpen', 0.4); await set('g-denoise', 0.3);
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const saved2 = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.ok(Math.abs(saved2.grade.sharpen - 0.4) < 1e-9 && Math.abs(saved2.grade.denoise - 0.3) < 1e-9);
+      // réinitialiser rend l'image d'origine
+      await page.click('#btn-grade-reset');
+      assert.deepEqual(await grade(), neutral);
+      await settle(page); await sleep(300);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.ok(meanAbsDiff(plain, await canvasThumb(page)) < 1.5, "après réinitialisation, l'image est celle d'origine");
+      await parity('après réinitialisation');
+    });
+  });
+
+  it("perche à selfie : miroir et disque de couleur, aperçu identique à l'export, enregistré par projet", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('perche'));
+      await page.click('.tab[data-tab=stick]');
+      const stick = () => page.evaluate('window.__x3.S.st.stick');
+      const set = (id, value) => page.evaluate(([id, value]) => {
+        const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true }));
+      }, [id, String(value)]);
+      const redraw = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      // écart sur le centre de l'image (le quart central d'une vignette de 64 x 64 pixels)
+      const centreDiff = (a, b) => {
+        let sum = 0, n = 0;
+        for (let y = 24; y < 40; y++) for (let x = 24; x < 40; x++) for (let c = 0; c < 3; c++) { sum += Math.abs(a[(y * 64 + x) * 4 + c] - b[(y * 64 + x) * 4 + c]); n++; }
+        return sum / n;
+      };
+      assert.equal((await stick()).mode, 'off');
+      assert.ok(await page.locator('#f-k-color').isHidden(), 'la couleur ne sert qu\'au disque');
+      // on regarde le nadir : le préréglage « petite planète » le place au centre de l'image
+      await page.click('#btn-look-nadir');
+      await settle(page); await sleep(400);
+      const plain = await canvasThumb(page);
+      // la zone de la perche est petite : on compare le centre de l'image (le nadir), où elle se trouve
+      const centre = [0.3, 0.25, 0.7, 0.75];
+      const parity = async (label, region = centre, limit = 0.02) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page, region);
+        assert.ok(diff < limit, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      await parity('sans traitement');
+
+      // miroir
+      await page.selectOption('#k-mode', 'mirror');
+      await set('k-radius', 30);
+      assert.deepEqual((({ mode, radius }) => ({ mode, radius }))(await stick()), { mode: 'mirror', radius: 30 });
+      await redraw();
+      assert.ok(centreDiff(plain, await canvasThumb(page)) > 8, 'le miroir change le centre de l\'aperçu');
+      await page.evaluate('window.__x3.flushSave()');
+      await parity('miroir');
+
+      // disque de couleur
+      await page.selectOption('#k-mode', 'cover');
+      assert.ok(await page.locator('#f-k-color').isVisible());
+      await page.evaluate(() => { const e = document.getElementById('k-color'); e.value = '#c0392b'; e.dispatchEvent(new Event('input', { bubbles: true })); });
+      await set('k-radius', 35); await set('k-softness', 0.4);
+      await redraw();
+      const middle = await page.evaluate(() => {
+        const c = document.getElementById('gl'), img = new Image();
+        return new Promise((res) => { img.onload = () => {
+          const k = document.createElement('canvas'); k.width = img.width; k.height = img.height;
+          const x = k.getContext('2d'); x.drawImage(img, 0, 0);
+          res(Array.from(x.getImageData(img.width >> 1, img.height >> 1, 1, 1).data));
+        }; img.src = c.toDataURL('image/png'); });
+      });
+      assert.ok(Math.abs(middle[0] - 0xc0) < 6 && Math.abs(middle[1] - 0x39) < 6 && Math.abs(middle[2] - 0x2b) < 6, `centre ${middle}`);
+      await page.evaluate('window.__x3.flushSave()');
+      await parity('disque');
+
+      // la zone surlignée n'est qu'un repère : elle change l'aperçu, jamais l'export
+      const before = await canvasThumb(page);
+      await page.check('#k-show');
+      await redraw();
+      assert.ok(centreDiff(before, await canvasThumb(page)) > 8, 'zone surlignée');
+      await page.uncheck('#k-show');
+
+      // la zone est fixe dans le repère de la caméra : vue de côté, stabilisation verrouillée
+      await page.selectOption('#k-mode', 'mirror'); await set('k-radius', 40);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 40, pitch: -50, roll: 8, fov: 110, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'lock'; S.override = null;
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(1.0); S.dirty = true;
+      });
+      await parity('vue de côté, stabilisation verrouillée', [0, 0, 1, 1], 0.03);
+
+      // l'axe se règle, se réinitialise et tout est enregistré sur disque
+      await page.click('#pane-stick summary');
+      await set('k-yaw', 35); await set('k-pitch', -60);
+      assert.equal((await stick()).yaw, 35);
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.deepEqual(saved.stick, { mode: 'mirror', radius: 40, softness: 0.4, yaw: 35, pitch: -60, color: '#c0392b' });
+      await page.click('#btn-stick-axis-reset');
+      assert.deepEqual((({ yaw, pitch }) => ({ yaw, pitch }))(await stick()), { yaw: 0, pitch: -90 });
+      // le serveur refuse un rayon hors bornes
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { stick: { radius: 99 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /rayon/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // aucun traitement : retour à l'image d'origine
+      await page.selectOption('#k-mode', 'off');
+      assert.equal((await stick()).mode, 'off');
+    });
+  });
+
+  it("plusieurs perspectives : disposition, choix de la vue, keyframes par vue, aperçu identique à l'export", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('vues'));
+      await page.click('.tab[data-tab=views]');
+      const multi = () => page.evaluate('window.__x3.S.st.multi');
+      const redraw = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.equal((await multi()).layout, 'single');
+      assert.ok(await page.locator('#tile-outline').isHidden(), 'une seule vue : pas de cadre de sélection');
+      assert.equal(await page.locator('#tile-list li').count(), 1);
+      // la vue 1 : un cap connu, sans keyframe
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 25, pitch: -10, roll: 0, fov: 80, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(0.8); S.dirty = true;
+      });
+      const parity = async (label) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      // dispositions : le nombre de vues, leurs rectangles (comme le calcul de référence de Rust) et la parité avec l'export
+      const rectsOf = (layout, w, h, gap) => page.evaluate(async ([layout, w, h, gap]) => {
+        const m = await import('/geometry.js'); return m.layoutRects(layout, w, h, gap);
+      }, [layout, w, h, gap]);
+      assert.deepEqual(await rectsOf('pip', 1920, 1080, 0), [{ x: 0, y: 0, w: 1920, h: 1080 }, { x: 1286, y: 724, w: 576, h: 324 }]);
+      assert.deepEqual((await rectsOf('quad', 1920, 1080, 8))[3], { x: 964, y: 544, w: 956, h: 536 });
+      assert.deepEqual((await rectsOf('trio', 1920, 1080, 0))[1], { x: 1280, y: 0, w: 640, h: 540 });
+      for (const [layout, count, gap] of [['side', 2, 0], ['stack', 2, 0], ['pip', 2, 0], ['trio', 3, 0], ['quad', 4, 0], ['quad', 4, 8]]) {
+        await page.selectOption('#m-layout', layout);
+        await page.evaluate((gap) => { const e = document.getElementById('m-gap'); e.value = gap; e.dispatchEvent(new Event('input', { bubbles: true })); }, gap);
+        const m = await multi();
+        assert.equal(m.layout, layout);
+        assert.equal(m.views.length, count - 1, `${layout} : les vues manquantes sont créées`);
+        assert.deepEqual(m.views.map((v) => v.view.yaw), Array.from({ length: count - 1 }, (_, j) => ((360 * (j + 1) / count + 180) % 360 + 360) % 360 - 180),
+          `${layout} : les vues non modifiées se répartissent sur le tour`);
+        assert.equal(await page.locator('#tile-list li').count(), count);
+        assert.ok(await page.locator('#tile-outline').isVisible(), `${layout} : cadre de la vue sélectionnée`);
+        assert.equal(await page.locator('#f-m-gap').isVisible(), layout !== 'pip', `${layout} : l'écart ne concerne pas l'incrustation`);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(`${layout}, écart ${gap}`);
+      }
+      // deuxième vue : on la choisit dans la liste, on l'oriente, on lui donne des keyframes (la vue 1 n'en a pas)
+      await page.selectOption('#m-layout', 'side');
+      await page.evaluate(() => { const e = document.getElementById('m-gap'); e.value = 0; e.dispatchEvent(new Event('input', { bubbles: true })); });
+      await page.click('#tile-list li:nth-child(2) button');
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1);
+      assert.match(await page.innerText('#views-active'), /vue 2 sur 2/);
+      await page.click('.tab[data-tab=reframe]');
+      assert.equal(await page.inputValue('#proj'), 'flat');
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: -90, pitch: 5, fov: 70 }))");
+      let m = await multi();
+      assert.deepEqual([m.views[0].view.yaw, m.views[0].view.pitch, m.views[0].view.fov], [-90, 5, 70]);
+      const s0 = await page.evaluate('window.__x3.S.st.view');
+      assert.deepEqual([s0.yaw, s0.pitch, s0.fov], [25, -10, 80], 'la vue 1 n\'a pas bougé');
+      await page.evaluate('window.__x3.seek(0.0)'); await settle(page);
+      await page.keyboard.press('k');
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: 0 }))");
+      await page.evaluate('window.__x3.seek(2.0)'); await settle(page);
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: 120, fov: 100 }))");
+      await page.keyboard.press('k');
+      m = await multi();
+      assert.equal(m.views[0].keyframes.length, 2, 'les keyframes sont ceux de la vue 2');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0, '… et pas ceux de la vue 1');
+      assert.equal(await page.locator('.kf').count(), 2);
+      // projection propre à chaque vue
+      await page.selectOption('#proj', 'fisheye');
+      m = await multi();
+      assert.equal(m.views[0].projection, 'fisheye');
+      assert.equal(await page.evaluate('window.__x3.S.st.projection'), 'flat');
+      await page.selectOption('#proj', 'flat');
+      // revenir à la vue 1 en cliquant dessus dans l'aperçu
+      const box = await page.locator('#gl').boundingBox();
+      await page.mouse.click(box.x + box.width * 0.25, box.y + box.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 0, 'clic sur la moitié gauche : vue 1');
+      assert.equal(await page.locator('.kf').count(), 0, 'les keyframes affichés sont ceux de la vue 1');
+      await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1);
+      assert.equal(await page.locator('.kf').count(), 2);
+      // glisser dans la vue 2 ne déplace que la vue 2
+      const before = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes.map(k => k.yaw)');
+      await page.evaluate('window.__x3.seek(0.0)'); await settle(page);
+      await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.5); await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.75 - 60, box.y + box.height * 0.5, { steps: 3 }); await page.mouse.up();
+      const after = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes.map(k => k.yaw)');
+      assert.ok(after[0] > before[0] + 1, `le glissé modifie le keyframe de la vue 2 (${before} -> ${after})`);
+      assert.equal(await page.evaluate('window.__x3.S.st.view.yaw'), 25, 'la vue 1 n\'a pas bougé');
+      // l'aperçu suit chaque vue (keyframes de la vue 2 à t = 0, 1 et 2 s) et reste identique à l'export
+      for (const t of [0.0, 1.0, 2.0]) {
+        await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, t);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(`vue 2 avec keyframes, t = ${t}`);
+      }
+      // enregistré sur disque
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.multi.layout, 'side');
+      assert.equal(saved.multi.views[0].keyframes.length, 2);
+      assert.equal(saved.keyframes.length, 0);
+      // le serveur refuse un écart qui n'est pas un multiple de 4
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { multi: { gap: 6 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /multiple de 4/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // retour à une seule vue : le panneau Recadrage retrouve la vue 1
+      await page.click('.tab[data-tab=views]');
+      await page.selectOption('#m-layout', 'single');
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 0);
+      assert.ok(await page.locator('#tile-outline').isHidden());
+      await redraw();
+      await parity('retour à une seule vue');
+    });
+  });
+
+  it("enregistre le cadrage pendant la lecture : keyframes linéaires qui remplacent la plage, annulation", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('cadrage'));
+      const kf = (t, yaw) => ({ t, yaw, pitch: 0, roll: 0, fov: 90, distortion: 0 });
+      await page.evaluate(async ([a, b, c]) => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
+        S.st.keyframes = [a, b, c]; S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(0.3); S.dirty = true;
+      }, [kf(0, -30), kf(1.0, 0), kf(2.4, 10)]);
+      await settle(page);
+      assert.ok(await page.locator('#hud-rec').isHidden());
+      assert.ok(await page.locator('#btn-rec-undo').isHidden());
+      // enregistrement : la vue tourne de 1,5° toutes les 40 ms pendant ~1,2 s de lecture
+      await page.click('#btn-rec');
+      assert.ok(await page.locator('#hud-rec').isVisible());
+      assert.equal(await page.getAttribute('#btn-rec', 'aria-pressed'), 'true');
+      const t0 = await page.evaluate('window.__x3.S.rec.samples[0].t');
+      assert.ok(Math.abs(t0 - 0.3) < 0.06, `départ à ${t0}`);
+      await page.evaluate(async () => {
+        const X = window.__x3;
+        for (let i = 0; i < 30; i++) { X.editView((v) => ({ ...v, yaw: v.yaw + 1.5 })); await new Promise((r) => setTimeout(r, 40)); }
+      });
+      const live = await page.evaluate('window.__x3.S.rec.view.yaw');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 3, 'rien n\'est enregistré avant l\'arrêt');
+      assert.ok(await page.evaluate('!document.getElementById("video").paused'), 'la vidéo est en lecture');
+      await page.click('#btn-rec');
+      assert.equal(await page.evaluate('window.__x3.S.rec'), null);
+      assert.ok(await page.evaluate('document.getElementById("video").paused'));
+      assert.ok(await page.locator('#hud-rec').isHidden());
+      const kfs = await page.evaluate('window.__x3.S.st.keyframes');
+      const rec = kfs.filter((k) => k.ease === 'linear');
+      assert.ok(rec.length >= 2 && rec.length <= 16, `${rec.length} keyframes enregistrés`);
+      assert.ok(Math.abs(rec[0].t - 0.3) < 0.1 && rec[rec.length - 1].t > 1.0 && rec[rec.length - 1].t < 2.2, JSON.stringify(rec.map((k) => k.t)));
+      assert.ok(rec.every((k, i) => i === 0 || k.yaw > rec[i - 1].yaw), 'la vue tourne toujours dans le même sens');
+      assert.ok(Math.abs(rec[0].yaw - (-30 * (1 - 0.216))) < 2.5, `cap de départ ${rec[0].yaw} (vue interpolée à 0,3 s)`);
+      assert.ok(Math.abs(rec[rec.length - 1].yaw - live) < 3, `cap final ${rec[rec.length - 1].yaw} contre vue filmée ${live}`);
+      // les keyframes de la plage ont été remplacés (celui de 1,0 s a disparu), ceux d'avant et d'après sont conservés
+      assert.ok(kfs.some((k) => k.t === 0 && k.yaw === -30) && kfs.some((k) => k.t === 2.4 && k.yaw === 10));
+      assert.ok(!kfs.some((k) => k.t === 1.0), 'le keyframe de la plage enregistrée est remplacé');
+      assert.ok(kfs.every((k, i) => i === 0 || k.t >= kfs[i - 1].t), 'triés');
+      assert.ok(await page.locator('#btn-rec-undo').isVisible());
+      assert.equal(await page.locator('.kf').count(), kfs.length);
+      // enregistré sur disque, interpolation linéaire conservée
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.keyframes.filter((k) => k.ease === 'linear').length, rec.length);
+      // à mi-parcours d'un segment linéaire, l'aperçu et l'export concordent (un smoothstep donnerait une autre vue)
+      const mid = (rec[0].t + rec[1].t) / 2;
+      await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, mid);
+      await settle(page); await sleep(500);
+      const want = (rec[0].yaw + rec[1].yaw) / 2;
+      const got = await page.evaluate('window.__x3.viewer.view.yaw');
+      assert.ok(Math.abs(got - want) < 1.0, `à ${mid.toFixed(2)} s : cap ${got} au lieu de ${want} (interpolation linéaire)`);
+      const { diff } = await previewVsExport(page);
+      assert.ok(diff < 0.045, `l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      // annuler rend les keyframes d'origine
+      await page.click('#btn-rec-undo');
+      assert.deepEqual((await page.evaluate('window.__x3.S.st.keyframes')).map((k) => [k.t, k.yaw]), [[0, -30], [1, 0], [2.4, 10]]);
+      assert.ok(await page.locator('#btn-rec-undo').isHidden());
+      // un arrêt immédiat n'enregistre rien et ne touche à rien
+      await page.evaluate(() => { const b = document.getElementById('btn-rec'); b.click(); b.click(); });
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 3);
+      assert.match(await page.innerText('#toast'), /Rien à enregistrer/);
+      // la touche R lance puis arrête, et une fin de plage arrête aussi l'enregistrement
+      await page.evaluate(() => { window.__x3.S.st.trim = { start: 0, end: 0.9 }; window.__x3.seek(0.5); });
+      await settle(page);
+      await page.keyboard.press('r');
+      assert.ok(await page.evaluate('window.__x3.S.rec !== null'));
+      await waitForRecEnd(page);
+      assert.equal(await page.evaluate('window.__x3.S.rec'), null, 'la fin de la plage arrête l\'enregistrement');
+      const t1 = (await page.evaluate('window.__x3.S.st.keyframes')).filter((k) => k.ease === 'linear');
+      assert.ok(t1.length >= 2 && t1[t1.length - 1].t <= 1.05, JSON.stringify(t1.map((k) => k.t)));
+      await page.evaluate(() => { window.__x3.S.st.trim = { start: 0, end: 0 }; window.__x3.S.pending.add('trim'); });
+      // deuxième vue d'une disposition : ses keyframes sont enregistrés pour elle seule
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.keyframes = []; S.pending.add('keyframes');
+        S.st.multi = { layout: 'side', gap: 0, views: [{ projection: 'flat', view: { yaw: 90, pitch: 0, roll: 0, fov: 90, distortion: 0 }, keyframes: [] }] };
+        S.pending.add('multi'); S.tile = 1; S.override = null; S.dirty = true;
+        await X.flushSave(); X.seek(0.2);
+      });
+      await settle(page);
+      await page.click('#btn-rec');
+      // pendant l'enregistrement, la vue filmée, sa projection et la disposition ne changent pas
+      const gl = await page.locator('#gl').boundingBox();
+      await page.mouse.click(gl.x + gl.width * 0.25, gl.y + gl.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1, 'un clic sur l\'autre vue ne change pas la vue filmée');
+      await page.click('.tab[data-tab=reframe]');
+      await page.selectOption('#proj', 'fisheye');
+      assert.equal(await page.inputValue('#proj'), 'flat', 'la liste des projections revient à la projection de la vue filmée');
+      await page.click('#v-presets [data-preset=fisheye]');
+      assert.equal(await page.evaluate('window.__x3.S.st.multi.views[0].projection'), 'flat');
+      await page.click('.tab[data-tab=views]');
+      await page.selectOption('#m-layout', 'quad');
+      assert.equal(await page.inputValue('#m-layout'), 'side', 'la disposition ne change pas');
+      assert.equal(await page.evaluate('window.__x3.S.st.multi.layout'), 'side');
+      assert.equal(await page.evaluate('window.__x3.S.rec.tile'), 1);
+      await page.evaluate(async () => {
+        const X = window.__x3;
+        for (let i = 0; i < 20; i++) { X.editView((v) => ({ ...v, yaw: v.yaw - 2 })); await new Promise((r) => setTimeout(r, 40)); }
+      });
+      await page.click('#btn-rec');
+      const two = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes');
+      assert.ok(two.length >= 2 && two.every((k) => k.ease === 'linear'), JSON.stringify(two));
+      assert.ok(two[0].yaw > two[two.length - 1].yaw, 'la vue 2 a tourné vers la gauche');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0, 'la vue 1 n\'est pas touchée');
+    });
+  });
+
+  it("suivi de sujet : on désigne le sujet dans l'aperçu, la vue le suit, keyframes enregistrés et annulables", async () => {
+    await withPage(async (page) => {
+      // une vidéo de démonstration avec un sujet mobile (disque orange et cyan) qui traverse la scène, caméra fixe
+      const clipFile = makeDemo(path.join(app.media, 'sujet.insv'), { seconds: 3, motion: 'static', subject: true });
+      await openAndWait(page, clipFile);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(1.0); S.dirty = true;
+      });
+      await settle(page); await sleep(400);
+      // à t = 1 s le sujet est à (cap 0°, inclinaison 7,3°) : au centre, un peu au-dessus de l'horizon
+      const box = await page.locator('#gl').boundingBox();
+      const aspect = box.height / box.width;
+      const uy = Math.tan(7.3 * Math.PI / 180) / (Math.tan(45 * Math.PI / 180) * aspect);
+      const cy = (1 - uy) / 2;
+      assert.ok(await spriteFraction(page, [0.47, cy - 0.03, 0.53, cy + 0.03]) > 0.4, 'le sujet est visible à l\'endroit attendu');
+      assert.ok(await spriteFraction(page, [0.0, 0.0, 0.2, 0.2]) < 0.3);
+      // désignation : le bouton passe en mode « cliquez », le clic lance le suivi
+      await page.click('#btn-track');
+      assert.equal(await page.getAttribute('#btn-track', 'aria-pressed'), 'true');
+      assert.match(await page.innerText('#track-status'), /Cliquez sur le sujet/);
+      await page.click('#btn-track');
+      assert.equal(await page.getAttribute('#btn-track', 'aria-pressed'), 'false', 'un second clic annule');
+      await page.click('#btn-track');
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height * cy);
+      await waitFor(page, () => window.__x3.S.tracking === null && window.__x3.S.st.keyframes.length > 0, { timeout: 90000 });
+      const kfs = await page.evaluate('window.__x3.S.st.keyframes');
+      assert.ok(kfs.length >= 3 && kfs.length <= 30, `${kfs.length} keyframes`);
+      assert.ok(kfs.every((k) => k.ease === 'linear' && Number.isFinite(k.yaw) && Number.isFinite(k.pitch) && k.fov === 90), JSON.stringify(kfs[0]));
+      assert.ok(kfs[0].t < 0.1 && kfs[kfs.length - 1].t > 2.8, 'la plage suivie va du début à la fin de la vidéo');
+      assert.ok(Math.abs(kfs[0].yaw - (-30)) < 4 && Math.abs(kfs[kfs.length - 1].yaw - 60) < 5, `cap de ${kfs[0].yaw} à ${kfs[kfs.length - 1].yaw}`);
+      assert.ok(kfs.every((k, i) => i === 0 || k.yaw > kfs[i - 1].yaw - 1), 'le sujet va de gauche à droite');
+      assert.match(await page.innerText('#track-status'), /Sujet suivi de 0:00\.\d à 0:0\d\.\d/);
+      assert.ok(await page.locator('#btn-rec-undo').isVisible());
+      // la vue suit le sujet : à tout instant le sujet est au centre de l'aperçu
+      for (const t of [0.2, 1.0, 1.9, 2.7]) {
+        await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, t);
+        await settle(page); await sleep(400);
+        assert.ok(await spriteFraction(page, [0.46, 0.43, 0.54, 0.57]) > 0.4, `à ${t} s, le sujet est au centre de l'aperçu`);
+      }
+      // et l'aperçu reste identique à l'export (interpolation linéaire des keyframes)
+      const { diff } = await previewVsExport(page);
+      assert.ok(diff < 0.045, `l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      // enregistré sur disque, annulable
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.keyframes.length, kfs.length);
+      await page.click('#btn-rec-undo');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0);
     });
   });
 });

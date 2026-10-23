@@ -6,6 +6,7 @@ use crate::jobs::{Job, JobManager, JobState};
 use crate::pipeline::{self, ExportSettings};
 use crate::project::{self, Project, StabOverride};
 use crate::stabilize;
+use crate::tracker::{self, TrackParams};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -207,6 +208,64 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // -- suivi de sujet --------------------------------------------------------
+    /// Fichier du dernier suivi du projet : `{job, params, track, keyframes}`.
+    pub fn track_path(p: &Project) -> PathBuf {
+        p.dir.join("track.json")
+    }
+
+    /// Lance le suivi d'un sujet (tâche `track`) : les instants et la plage sont ramenés dans la vidéo, la stabilisation
+    /// est celle du projet au moment du lancement ; le résultat est écrit dans [`App::track_path`].
+    pub fn start_tracking(self: &Arc<Self>, p: &Arc<Project>, mut params: TrackParams) -> Result<Arc<Job>> {
+        if ![params.t0, params.yaw, params.pitch, params.size, params.start, params.end].iter().all(|v| v.is_finite()) {
+            return Err(export_err("Paramètres de suivi invalides."));
+        }
+        if !(-90.0..=90.0).contains(&params.pitch) {
+            return Err(export_err("L'inclinaison du sujet doit être comprise entre -90 et 90°."));
+        }
+        if !p.has_proxy() {
+            return Err(export_err("L'aperçu n'est pas encore prêt : attendez sa préparation pour suivre un sujet."));
+        }
+        let duration = p.src.duration;
+        params.t0 = params.t0.clamp(0.0, duration);
+        params.start = params.start.clamp(0.0, params.t0);
+        params.end = if params.end > params.t0 { params.end.min(duration) } else { duration };
+        params.size = params.size.clamp(tracker::SIZE_RANGE.0, tracker::SIZE_RANGE.1);
+        let stab = p.stab_matrices(&StabOverride::default());
+        let pc = p.clone();
+        let title = format!("Suivi de sujet : {}", file_name(Path::new(&p.src.path)));
+        Ok(self.jobs.submit(
+            "track",
+            &title,
+            &p.id,
+            true,
+            Box::new(move |job| {
+                job.set_message("Suivi du sujet");
+                let track = tracker::track_video(
+                    &pc.src,
+                    &pc.calibration(),
+                    &pc.proxy_path(),
+                    stab.as_deref(),
+                    &params,
+                    &|f| job.set_progress(f),
+                    &job.cancel,
+                )?;
+                let keyframes = tracker::samples_to_keyframes(&track.samples, tracker::KEYFRAME_TOLERANCE);
+                let file = App::track_path(&pc);
+                let tmp = file.with_extension("tmp");
+                std::fs::write(
+                    &tmp,
+                    serde_json::to_string(&serde_json::json!({
+                        "job": job.id, "params": params, "track": track, "keyframes": keyframes,
+                    }))?,
+                )?;
+                std::fs::rename(&tmp, &file)?;
+                Ok(file.to_string_lossy().into_owned())
+            }),
+            None,
+        ))
     }
 
     // -- exports -------------------------------------------------------------

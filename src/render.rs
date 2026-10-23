@@ -12,6 +12,7 @@
 use crate::calibration::Calibration;
 use crate::error::{export_err, Result};
 use crate::geometry::Mat3;
+use crate::stick::{Stick, StickGeom, StickMode};
 use rayon::prelude::*;
 use std::f64::consts::PI;
 use std::str::FromStr;
@@ -54,11 +55,43 @@ pub enum SourceKind {
 // ---------------------------------------------------------------------------
 // Rayons de sortie
 // ---------------------------------------------------------------------------
+/// Distorsion maximale acceptée (au-delà, la projection se replie sur elle-même).
+pub const MAX_DISTORTION: f64 = 2.0;
+
+/// Demi-angle maximal (rad) de la perspective générale de distorsion `d` : au-delà, la formule diverge
+/// (`d < 1` : asymptote, `d = 0` : 90°) ou se replie (`d > 1` : la sphère vue de l'extérieur).
+pub fn perspective_limit(d: f64) -> f64 {
+    if d >= 1.0 {
+        (-1.0 / d).acos()
+    } else {
+        (-d.max(0.0)).acos()
+    }
+}
+
+/// Perspective générale (point de vue à la distance `d` du centre de la sphère) : un rayon d'angle `θ` à l'axe
+/// arrive à `r = (d+1)·sin θ / (d + cos θ)` ; `d = 0` est la projection rectiligne, `d = 1` la stéréographique
+/// (petite planète), `d → ∞` l'orthographique. `r` est normalisé pour que le bord horizontal de l'image (`|u| = 1`)
+/// corresponde à `fov / 2` quelle que soit la distorsion : la distorsion change la forme sans changer le champ.
+/// Inverse en forme close : `θ = atan2(r, d+1) + asin(r·d / √((d+1)² + r²))`.
+#[inline]
+fn general_ray(u: f64, v: f64, fov: f64, aspect: f64, d: f64) -> [f64; 3] {
+    let half = (fov / 2.0).min(perspective_limit(d) * 0.999);
+    let ge = (d + 1.0) * half.sin() / (d + half.cos());
+    let (x, y) = (u * ge, v * aspect * ge);
+    let r = x.hypot(y);
+    let big_r = ((d + 1.0).powi(2) + r * r).sqrt();
+    let th = r.atan2(d + 1.0) + (r * d / big_r).clamp(-1.0, 1.0).asin();
+    let s = if r > 1e-9 { th.sin() / r } else { 1.0 };
+    [x * s, -y * s, th.cos()]
+}
+
 /// Direction (normalisée) du pixel de coordonnées normalisées `(u, v)` ∈ [-1, 1]² (v vers le bas) ;
 /// `fov` = champ horizontal en radians, `aspect` = h/w. Même calcul (en f64) que `output_rays` de Python.
+/// `dist` : distorsion de la projection `Flat` (0 = rectiligne), ignorée par les autres.
 #[inline]
-fn ray_at(proj: Projection, u: f64, v: f64, fov: f64, aspect: f64) -> [f64; 3] {
+fn ray_at(proj: Projection, u: f64, v: f64, fov: f64, aspect: f64, dist: f64) -> [f64; 3] {
     match proj {
+        Projection::Flat if dist > 1e-6 => general_ray(u, v, fov, aspect, dist.min(MAX_DISTORTION)),
         Projection::Flat => {
             let t = (fov / 2.0).tan();
             let (x, y, z) = (u * t, -v * t * aspect, 1.0);
@@ -103,6 +136,22 @@ pub fn output_rays(
     y0: u32,
     y1: u32,
 ) -> Vec<[f32; 3]> {
+    output_rays_with(proj, 0.0, gw, gh, fov_deg, out_w, out_h, y0, y1)
+}
+
+/// Comme [`output_rays`], avec la distorsion `dist` de la projection `Flat`.
+#[allow(clippy::too_many_arguments)]
+pub fn output_rays_with(
+    proj: Projection,
+    dist: f64,
+    gw: usize,
+    gh: usize,
+    fov_deg: f64,
+    out_w: u32,
+    out_h: u32,
+    y0: u32,
+    y1: u32,
+) -> Vec<[f32; 3]> {
     let aspect = out_h as f64 / out_w as f64;
     let fov = fov_deg.to_radians();
     let mut out = Vec::with_capacity(gw * gh);
@@ -111,7 +160,7 @@ pub fn output_rays(
         let v = ypix / out_h as f64 * 2.0 - 1.0;
         for gx in 0..gw {
             let u = (gx as f64 + 0.5) / gw as f64 * 2.0 - 1.0;
-            let r = ray_at(proj, u, v, fov, aspect);
+            let r = ray_at(proj, u, v, fov, aspect, dist);
             out.push([r[0] as f32, r[1] as f32, r[2] as f32]);
         }
     }
@@ -170,6 +219,8 @@ pub struct LensRenderer {
     chroma_rows: Vec<Tap>,
     frame_in: usize,
     frame_out: usize,
+    /// Zone de la perche à selfie / du nadir à masquer (repère de la caméra), si activée.
+    stick: Option<StickGeom>,
 }
 
 /// Lignes de sortie traitées par tâche rayon (paire : la chrominance a la moitié).
@@ -219,7 +270,14 @@ impl LensRenderer {
             chroma_rows: taps(out_h / 2, gh),
             frame_in,
             frame_out: out_w * out_h * 3 / 2,
+            stick: None,
         })
+    }
+
+    /// Active le masquage de la perche à selfie / du nadir (voir [`crate::stick`]).
+    pub fn with_stick(mut self, stick: &Stick) -> Self {
+        self.stick = stick.geometry();
+        self
     }
 
     /// Octets d'une image d'entrée I420.
@@ -239,17 +297,24 @@ impl LensRenderer {
     /// `m` : sortie -> sphère de la caméra (`stab · V`), `fov_deg` : champ horizontal (ignoré pour
     /// `Equirect`). `out.len() == frame_bytes_out()`, `frame.len() == frame_bytes_in()`.
     pub fn render(&self, frame: &[u8], m: &Mat3, fov_deg: f64, out: &mut [u8]) {
+        self.render_with(frame, m, fov_deg, 0.0, out);
+    }
+
+    /// Comme [`LensRenderer::render`], avec la distorsion `dist` (0 = rectiligne, 1 = stéréographique ; projection
+    /// `Flat` seulement).
+    pub fn render_with(&self, frame: &[u8], m: &Mat3, fov_deg: f64, dist: f64, out: &mut [u8]) {
         assert_eq!(frame.len(), self.frame_in, "taille d'image d'entrée inattendue");
         assert_eq!(out.len(), self.frame_out, "taille d'image de sortie inattendue");
         match self.src {
-            SourceKind::Dual { lens } => self.render_dual(frame, lens as usize, m, fov_deg, out),
-            SourceKind::Equirect { w, h } => self.render_equirect(frame, w as usize, h as usize, m, fov_deg, out),
+            SourceKind::Dual { lens } => self.render_dual(frame, lens as usize, m, fov_deg, dist, out),
+            SourceKind::Equirect { w, h } => self.render_equirect(frame, w as usize, h as usize, m, fov_deg, dist, out),
         }
     }
 
     // -- objectifs fisheye ---------------------------------------------------
-    /// Table grossière : pour chaque cellule, coordonnées (luma) dans A et B et poids de A.
-    fn coarse_table(&self, lens: usize, m: &Mat3, fov_deg: f64) -> Vec<Cell> {
+    /// Table grossière : pour chaque cellule, coordonnées (luma) dans A et B et poids de A. Avec le disque de couleur
+    /// de la perche, une seconde table donne son opacité par cellule.
+    fn coarse_table(&self, lens: usize, m: &Mat3, fov_deg: f64, dist: f64) -> (Vec<Cell>, Option<Vec<f32>>) {
         let (ra, rb) = self.calib.lens_matrices();
         let (rot_a, rot_b) = (ra * m, rb * m);
         let fov_out = fov_deg.to_radians();
@@ -260,13 +325,24 @@ impl LensRenderer {
         let size = lens as f64;
         let (gw, gh) = (self.gw, self.gh);
         let mut table = vec![[0f32; 5]; gw * gh];
-        table.par_chunks_mut(gw).enumerate().for_each(|(gy, row)| {
+        let cover = self.stick.is_some_and(|s| s.mode == StickMode::Cover);
+        let mut alpha = if cover { vec![0f32; gw * gh] } else { vec![] };
+        let fill = |gy: usize, row: &mut [Cell], mut cover_row: Option<&mut [f32]>| {
             let v = (gy as f64 + 0.5) / gh as f64 * 2.0 - 1.0;
             for (gx, cell) in row.iter_mut().enumerate() {
                 let u = (gx as f64 + 0.5) / gw as f64 * 2.0 - 1.0;
-                let a = ray_at(self.proj, u, v, fov_out, aspect);
-                let (xa, ya, ta) = lens_coords(&rot_a, &a, half_lens, size);
-                let (xb, yb, tb) = lens_coords(&rot_b, &a, half_lens, size);
+                let a = ray_at(self.proj, u, v, fov_out, aspect, dist);
+                let ((xa, ya, ta), (xb, yb, tb)) = match &self.stick {
+                    None => (lens_coords(&rot_a, &a, half_lens, size), lens_coords(&rot_b, &a, half_lens, size)),
+                    Some(st) => {
+                        // direction dans le repère de la caméra (avant les petits réglages de chaque objectif)
+                        let (d, opacity) = st.apply(mul_vec(m, &a));
+                        if let Some(c) = cover_row.as_deref_mut() {
+                            c[gx] = opacity;
+                        }
+                        (lens_coords(&ra, &d, half_lens, size), lens_coords(&rb, &d, half_lens, size))
+                    }
+                };
                 let (cov_a, cov_b) = ((ta <= cov_limit) as u8 as f64, (tb <= cov_limit) as u8 as f64);
                 let th = ta.to_degrees();
                 let wa = if blend <= 0.0 {
@@ -280,12 +356,19 @@ impl LensRenderer {
                 let w = if s > 1e-6 { wa_c / s } else { 0.5 };
                 *cell = [xa as f32, ya as f32, xb as f32, yb as f32, w as f32];
             }
-        });
-        table
+        };
+        if cover {
+            table.par_chunks_mut(gw).zip(alpha.par_chunks_mut(gw)).enumerate().for_each(|(gy, (row, c))| {
+                fill(gy, row, Some(c));
+            });
+        } else {
+            table.par_chunks_mut(gw).enumerate().for_each(|(gy, row)| fill(gy, row, None));
+        }
+        (table, cover.then_some(alpha))
     }
 
-    fn render_dual(&self, frame: &[u8], lens: usize, m: &Mat3, fov_deg: f64, out: &mut [u8]) {
-        let table = self.coarse_table(lens, m, fov_deg);
+    fn render_dual(&self, frame: &[u8], lens: usize, m: &Mat3, fov_deg: f64, dist: f64, out: &mut [u8]) {
+        let (table, cover) = self.coarse_table(lens, m, fov_deg, dist);
         let (w, h) = (self.out_w, self.out_h);
         let ysz = 2 * lens * lens;
         let csz = (lens / 2) * lens;
@@ -321,10 +404,47 @@ impl LensRenderer {
                     cw,
                 );
             });
+        if let (Some(alpha), Some(st)) = (&cover, &self.stick) {
+            self.apply_cover(alpha, st.yuv, out);
+        }
+    }
+
+    /// Recouvre de la couleur `yuv` les pixels dont l'opacité (table grossière `alpha`, interpolée comme les
+    /// coordonnées) n'est pas nulle.
+    fn apply_cover(&self, alpha: &[f32], yuv: [u8; 3], out: &mut [u8]) {
+        let (w, h, gw, gh) = (self.out_w, self.out_h, self.gw, self.gh);
+        // lignes de la grille grossière qui ne contiennent aucune opacité : rien à faire pour les pixels qui en dépendent
+        let row_used: Vec<bool> = (0..gh).map(|gy| alpha[gy * gw..][..gw].iter().any(|&a| a > 0.0)).collect();
+        let (y_out, uv_out) = out.split_at_mut(w * h);
+        let (u_out, v_out) = uv_out.split_at_mut(w * h / 4);
+        let plane = |data: &mut [u8], pw: usize, cols: &[Tap], rows: &[Tap], color: u8| {
+            data.par_chunks_mut(pw).enumerate().for_each(|(r, line)| {
+                let ry = rows[r];
+                let (i0, i1) = (ry.i0 as usize, ry.i1 as usize);
+                if !row_used[i0] && !row_used[i1] {
+                    return;
+                }
+                let (top, bot) = (&alpha[i0 * gw..][..gw], &alpha[i1 * gw..][..gw]);
+                for (px, ct) in line.iter_mut().zip(cols) {
+                    let (c0, c1) = (ct.i0 as usize, ct.i1 as usize);
+                    let t = top[c0] + (top[c1] - top[c0]) * ct.f;
+                    let b = bot[c0] + (bot[c1] - bot[c0]) * ct.f;
+                    let a = t + (b - t) * ry.f;
+                    if a > 0.0 {
+                        let v = f32::from(*px);
+                        *px = (v + (f32::from(color) - v) * a + 0.5) as u8;
+                    }
+                }
+            });
+        };
+        plane(y_out, w, &self.luma_cols, &self.luma_rows, yuv[0]);
+        plane(u_out, w / 2, &self.chroma_cols, &self.chroma_rows, yuv[1]);
+        plane(v_out, w / 2, &self.chroma_cols, &self.chroma_rows, yuv[2]);
     }
 
     // -- source équirectangulaire ----------------------------------------------
-    fn render_equirect(&self, frame: &[u8], sw: usize, sh: usize, m: &Mat3, fov_deg: f64, out: &mut [u8]) {
+    #[allow(clippy::too_many_arguments)]
+    fn render_equirect(&self, frame: &[u8], sw: usize, sh: usize, m: &Mat3, fov_deg: f64, dist: f64, out: &mut [u8]) {
         let (w, h) = (self.out_w, self.out_h);
         let (y_src, rest) = frame.split_at(sw * sh);
         let (u_src, v_src) = rest.split_at(sw * sh / 4);
@@ -337,36 +457,63 @@ impl LensRenderer {
         let (u_out, v_out) = uv_out.split_at_mut(w * h / 4);
         let cw = w / 2;
 
-        // un plan : `pw x ph` pixels de sortie, source `(src, sw_p x sh_p)`
-        let render_rows = |dst: &mut [u8], row0: usize, pw: usize, ph: usize, src: &[u8], sw_p: usize, sh_p: usize| {
+        let cover_color = self.stick.map_or([0; 3], |s| s.yuv);
+        // un plan (0 = Y, 1 = U, 2 = V) : `pw x ph` pixels de sortie, source `(src, sw_p x sh_p)`
+        let render_rows = |plane_idx: usize,
+                           dst: &mut [u8],
+                           row0: usize,
+                           pw: usize,
+                           ph: usize,
+                           src: &[u8],
+                           sw_p: usize,
+                           sh_p: usize| {
             for (r, line) in dst.chunks_mut(pw).enumerate() {
                 let v = ((row0 + r) as f64 + 0.5) / ph as f64 * 2.0 - 1.0;
                 for (i, px) in line.iter_mut().enumerate() {
                     let u = (i as f64 + 0.5) / pw as f64 * 2.0 - 1.0;
-                    let a = ray_at(proj, u, v, fov, aspect);
+                    let a = ray_at(proj, u, v, fov, aspect, dist);
                     let d = [
                         mm[0][0] * a[0] + mm[0][1] * a[1] + mm[0][2] * a[2],
                         mm[1][0] * a[0] + mm[1][1] * a[1] + mm[1][2] * a[2],
                         mm[2][0] * a[0] + mm[2][1] * a[1] + mm[2][2] * a[2],
                     ];
+                    let (d, opacity) = match &self.stick {
+                        Some(st) => st.apply(d),
+                        None => (d, 0.0),
+                    };
                     let lon = d[0].atan2(d[2]);
                     let lat = d[1].clamp(-1.0, 1.0).asin();
                     let x = (lon / (2.0 * PI) + 0.5) * sw_p as f64 - 0.5;
                     let y = (0.5 - lat / PI) * sh_p as f64 - 0.5;
-                    *px = bilerp_wrap_x(src, sw_p, sh_p, x as f32, y as f32);
+                    let sample = bilerp_wrap_x(src, sw_p, sh_p, x as f32, y as f32);
+                    *px = if opacity > 0.0 {
+                        let v = f32::from(sample);
+                        (v + (f32::from(cover_color[plane_idx]) - v) * opacity + 0.5) as u8
+                    } else {
+                        sample
+                    };
                 }
             }
         };
         y_out.par_chunks_mut(CHUNK_ROWS * w).enumerate().for_each(|(ci, yc)| {
-            render_rows(yc, ci * CHUNK_ROWS, w, h, y_src, sw, sh);
+            render_rows(0, yc, ci * CHUNK_ROWS, w, h, y_src, sw, sh);
         });
         u_out.par_chunks_mut(CHUNK_ROWS / 2 * cw).enumerate().for_each(|(ci, uc)| {
-            render_rows(uc, ci * CHUNK_ROWS / 2, cw, h / 2, u_src, sw / 2, sh / 2);
+            render_rows(1, uc, ci * CHUNK_ROWS / 2, cw, h / 2, u_src, sw / 2, sh / 2);
         });
         v_out.par_chunks_mut(CHUNK_ROWS / 2 * cw).enumerate().for_each(|(ci, vc)| {
-            render_rows(vc, ci * CHUNK_ROWS / 2, cw, h / 2, v_src, sw / 2, sh / 2);
+            render_rows(2, vc, ci * CHUNK_ROWS / 2, cw, h / 2, v_src, sw / 2, sh / 2);
         });
     }
+}
+
+/// Produit matrice x vecteur.
+fn mul_vec(m: &Mat3, a: &[f64; 3]) -> [f64; 3] {
+    [
+        m[(0, 0)] * a[0] + m[(0, 1)] * a[1] + m[(0, 2)] * a[2],
+        m[(1, 0)] * a[0] + m[(1, 1)] * a[1] + m[(1, 2)] * a[2],
+        m[(2, 0)] * a[0] + m[(2, 1)] * a[1] + m[(2, 2)] * a[2],
+    ]
 }
 
 /// Coordonnées pixel `(x, y)` dans un fisheye carré de côté `size` + angle à l'axe (rad) pour la direction
@@ -589,6 +736,95 @@ mod tests {
             band[0][1] > full[2][1] && band[0][1] < full[0][1],
             "le centre de la bande est entre les lignes 0 et 1"
         );
+    }
+
+    /// Rayon attendu pour un angle `th` à l'axe et un azimut `az` (y vers le bas), par la formule *directe*
+    /// `r = (d+1) sin θ / (d + cos θ)` écrite ici indépendamment de la formule inverse du moteur.
+    fn forward_uv(th: f64, az: f64, half: f64, d: f64) -> (f64, f64) {
+        let g = |t: f64| (d + 1.0) * t.sin() / (d + t.cos());
+        let r = g(th) / g(half);
+        (r * az.cos(), r * az.sin())
+    }
+
+    #[test]
+    fn general_perspective_inverts_its_forward_formula() {
+        for d in [0.05, 0.3, 0.5, 0.8, 1.0, 1.4, 2.0] {
+            for fov_deg in [40.0, 90.0, 140.0] {
+                let half = (fov_deg / 2.0f64).to_radians().min(perspective_limit(d) * 0.99);
+                for k in 1..=8 {
+                    let th = half * k as f64 / 8.0;
+                    for az in [0.0, 0.7, 2.0, -2.5] {
+                        let (u, v) = forward_uv(th, az, half, d);
+                        let ray = ray_at(Projection::Flat, u, v, 2.0 * half, 1.0, d);
+                        let want = [th.sin() * az.cos(), -th.sin() * az.sin(), th.cos()];
+                        for i in 0..3 {
+                            assert!(
+                                (ray[i] - want[i]).abs() < 1e-9,
+                                "d={d} fov={fov_deg} θ={th} : {ray:?} vs {want:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn distortion_changes_the_shape_not_the_field_and_contains_both_classic_projections() {
+        let fov = 120.0f64.to_radians();
+        // le bord horizontal de l'image reste à fov / 2 quelle que soit la distorsion
+        for d in [0.0, 0.2, 0.7, 1.0, 1.6] {
+            let r = ray_at(Projection::Flat, 1.0, 0.0, fov, 0.5625, d);
+            assert!((r[0].atan2(r[2]) - fov / 2.0).abs() < 1e-9, "d={d}");
+            let r = ray_at(Projection::Flat, -1.0, 0.0, fov, 0.5625, d);
+            assert!((r[0].atan2(r[2]) + fov / 2.0).abs() < 1e-9, "d={d}");
+        }
+        // d → 0 : rectiligne ; d = 1 : stéréographique (la petite planète, image carrée)
+        for (u, v) in [(0.3, -0.4), (0.9, 0.2), (-0.6, 0.7)] {
+            let flat = ray_at(Projection::Flat, u, v, fov, 1.0, 0.0);
+            let near0 = ray_at(Projection::Flat, u, v, fov, 1.0, 1e-5);
+            let planet = ray_at(Projection::Planet, u, v, fov, 1.0, 0.0);
+            let d1 = ray_at(Projection::Flat, u, v, fov, 1.0, 1.0);
+            for i in 0..3 {
+                assert!((flat[i] - near0[i]).abs() < 1e-4, "continuité en 0 : {flat:?} {near0:?}");
+                assert!((planet[i] - d1[i]).abs() < 1e-9, "d = 1 est la petite planète : {planet:?} {d1:?}");
+            }
+        }
+        // plus la distorsion augmente, plus le centre est agrandi par rapport aux bords : l'angle à mi-chemin décroît
+        let mid = |d: f64| ray_at(Projection::Flat, 0.5, 0.0, fov, 1.0, d);
+        let ang = |r: [f64; 3]| r[0].atan2(r[2]);
+        assert!(ang(mid(0.0)) > ang(mid(0.5)) && ang(mid(0.5)) > ang(mid(1.0)), "angle à mi-chemin décroissant");
+        // la distorsion demandée au-delà de la limite est bornée (pas de NaN)
+        let r = ray_at(Projection::Flat, 1.0, 0.9, 340.0f64.to_radians(), 1.0, 0.3);
+        assert!(r.iter().all(|c| c.is_finite()));
+        assert!((perspective_limit(0.0) - PI / 2.0).abs() < 1e-12);
+        assert!((perspective_limit(1.0) - PI).abs() < 1e-12);
+        assert!((perspective_limit(2.0).to_degrees() - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn render_with_distortion_matches_the_classic_projections() {
+        let lens = 64;
+        let frame = smooth_dual(lens);
+        let c = Calibration::default();
+        let m = ypr_to_matrix(20.0, 10.0, 5.0);
+        // distorsion 0 = rendu historique ; distorsion 1 = petite planète sur une image carrée
+        let flat = LensRenderer::new(&c, SourceKind::Dual { lens: lens as u32 }, 48, 28, Projection::Flat, 4).unwrap();
+        let (mut a, mut b) = (vec![0u8; flat.frame_bytes_out()], vec![0u8; flat.frame_bytes_out()]);
+        flat.render(&frame, &m, 90.0, &mut a);
+        flat.render_with(&frame, &m, 90.0, 0.0, &mut b);
+        assert_eq!(a, b);
+        flat.render_with(&frame, &m, 90.0, 0.5, &mut b);
+        assert_ne!(a, b, "la distorsion modifie l'image");
+        let planet =
+            LensRenderer::new(&c, SourceKind::Dual { lens: lens as u32 }, 40, 40, Projection::Planet, 4).unwrap();
+        let square =
+            LensRenderer::new(&c, SourceKind::Dual { lens: lens as u32 }, 40, 40, Projection::Flat, 4).unwrap();
+        let (mut p, mut q) = (vec![0u8; planet.frame_bytes_out()], vec![0u8; planet.frame_bytes_out()]);
+        planet.render(&frame, &m, 250.0, &mut p);
+        square.render_with(&frame, &m, 250.0, 1.0, &mut q);
+        let diff = p.iter().zip(&q).map(|(x, y)| (*x as i32 - *y as i32).abs()).max().unwrap();
+        assert!(diff <= 1, "planète = perspective de distorsion 1 : écart max {diff}");
     }
 
     #[test]

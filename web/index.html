@@ -22,6 +22,7 @@
   <section class="stage">
     <div class="viewer-wrap">
       <canvas id="gl" aria-label="Aperçu 360°"></canvas>
+      <div id="tile-outline" class="tile-outline" hidden></div>
       <video id="video" class="vhid" playsinline preload="auto"></video>
       <div id="overlay-msg" class="overlay-msg" hidden></div>
       <div class="hud hud-tl">
@@ -38,6 +39,7 @@
         <button id="btn-snap" class="btn small" title="Enregistrer l'image affichée en JPEG pleine résolution">Capturer l'image</button>
       </div>
       <div class="hud hud-bl" id="hud-readout" aria-hidden="true"></div>
+      <div class="hud hud-tc" id="hud-rec" hidden>● REC</div>
       <div class="hud hud-br" id="hud-hint">Glisser : orienter · Molette : zoom</div>
     </div>
 
@@ -50,6 +52,7 @@
         <div id="playhead" class="playhead"></div>
       </div>
       <button id="btn-kf" class="btn" title="Ajouter un keyframe avec la vue actuelle (K)">◆ Keyframe</button>
+      <button id="btn-rec" class="btn" title="Lire la vidéo en orientant la vue : le tracé devient des keyframes (R)" aria-pressed="false">● Cadrage</button>
       <button id="btn-in" class="btn" title="Début de l'export (I)">[ Début</button>
       <button id="btn-out" class="btn" title="Fin de l'export (O)">Fin ]</button>
     </div>
@@ -58,6 +61,9 @@
   <aside class="panel">
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="reframe" role="tab">Recadrage</button>
+      <button class="tab" data-tab="views" role="tab">Vues</button>
+      <button class="tab" data-tab="image" role="tab">Image</button>
+      <button class="tab" data-tab="stick" role="tab">Perche</button>
       <button class="tab" data-tab="stab" role="tab">Stabilisation</button>
       <button class="tab" data-tab="lens" role="tab">Objectifs</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
@@ -65,15 +71,87 @@
     </nav>
 
     <section class="pane active" id="pane-reframe">
-      <h3>Vue actuelle</h3>
+      <h3>Vue actuelle <small id="views-active"></small></h3>
       <div class="field"><label for="v-yaw">Cap (lacet)</label><input id="v-yaw" type="range" min="-180" max="180" step="0.5"><output id="o-yaw"></output></div>
       <div class="field"><label for="v-pitch">Inclinaison</label><input id="v-pitch" type="range" min="-90" max="90" step="0.5"><output id="o-pitch"></output></div>
       <div class="field"><label for="v-roll">Roulis</label><input id="v-roll" type="range" min="-180" max="180" step="0.5"><output id="o-roll"></output></div>
       <div class="field"><label for="v-fov">Champ de vision</label><input id="v-fov" type="range" min="20" max="150" step="1"><output id="o-fov"></output></div>
+      <div class="field" id="f-dist"><label for="v-dist">Distorsion <small>0 = rectiligne · 1 = petite planète</small></label><input id="v-dist" type="range" min="0" max="2" step="0.01"><output id="o-distortion"></output></div>
+      <div class="presets" id="v-presets" role="group" aria-label="Préréglages de perspective">
+        <button type="button" class="btn small ghost" data-preset="lineaire" title="Perspective rectiligne : les lignes droites restent droites">Linéaire</button>
+        <button type="button" class="btn small ghost" data-preset="naturel" title="Rendu proche de l'œil, bords légèrement comprimés">Naturel</button>
+        <button type="button" class="btn small ghost" data-preset="large" title="Grand angle">Grand angle</button>
+        <button type="button" class="btn small ghost" data-preset="ultra" title="Ultra grand angle">Ultra grand angle</button>
+        <button type="button" class="btn small ghost" data-preset="fisheye" title="Fisheye équidistant">Fisheye</button>
+        <button type="button" class="btn small ghost" data-preset="planete" title="Petite planète (animable entre keyframes)">Petite planète</button>
+      </div>
       <p class="hint">Sans keyframe, la vue est la même pour toute la vidéo. Placez-vous sur un instant, orientez la vue puis ajoutez un keyframe : la caméra virtuelle se déplace en douceur d'un keyframe au suivant.</p>
+      <h3>Enregistrer le cadrage</h3>
+      <p class="hint">Plus rapide que les keyframes un à un : <b>● Cadrage</b> (ou <kbd>R</kbd>) lance la lecture, orientez la vue à la souris (glisser, molette) en suivant l'action, puis arrêtez. Le tracé devient quelques keyframes qui remplacent ceux de la plage filmée.</p>
+      <div class="field"><label for="rec-speed">Vitesse de lecture pendant l'enregistrement</label>
+        <select id="rec-speed"><option value="0.25">×0,25</option><option value="0.5">×0,5</option><option value="1" selected>×1</option></select></div>
+      <div class="row"><button id="btn-rec-undo" class="btn small" hidden>↶ Annuler le dernier enregistrement ou suivi</button></div>
+      <h3>Suivre un sujet</h3>
+      <p class="hint">Désignez un sujet dans l'aperçu : la vue le suit, avant et après cet instant, et les keyframes qui le gardent au centre remplacent ceux de la plage suivie. Réglez d'abord la stabilisation : le suivi en tient compte.</p>
+      <div class="field"><label for="t-size">Taille du sujet <small>environ ce qu'il occupe dans la vue</small></label><input id="t-size" type="range" min="3" max="40" step="1" value="12"><output></output></div>
+      <label class="check"><input type="checkbox" id="t-back" checked> Suivre aussi avant l'instant désigné</label>
+      <div class="row"><button id="btn-track" class="btn" aria-pressed="false" title="Puis cliquez sur le sujet dans l'aperçu">⌖ Désigner un sujet à suivre</button></div>
+      <div id="track-status" class="status-box" hidden></div>
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>
       <p id="kf-empty" class="hint">Aucun keyframe.</p>
+    </section>
+
+    <section class="pane" id="pane-views">
+      <h3>Plusieurs perspectives</h3>
+      <div class="field"><label for="m-layout">Disposition</label>
+        <select id="m-layout">
+          <option value="single">Une seule vue</option>
+          <option value="side">Deux vues côte à côte</option>
+          <option value="stack">Deux vues, l'une au-dessus de l'autre</option>
+          <option value="pip">Incrustation (vue dans la vue)</option>
+          <option value="trio">Une grande vue et deux petites</option>
+          <option value="quad">Quatre vues (2 × 2)</option>
+        </select></div>
+      <div class="field" id="f-m-gap" hidden><label for="m-gap">Écart entre les vues <small>noir, en pixels de l'image</small></label><input id="m-gap" type="range" min="0" max="40" step="4"><output></output></div>
+      <h3>Vues</h3>
+      <ul id="tile-list" class="kf-list"></ul>
+      <p class="hint">Chaque vue a sa projection, sa caméra et ses keyframes. Choisissez une vue ici (ou cliquez dessus dans l'aperçu), puis réglez-la dans l'onglet <b>Recadrage</b>. La vue 1 est celle du projet ; les autres se répartissent d'abord sur le tour de l'horizon. La stabilisation, les réglages d'image et la perche s'appliquent à toutes.</p>
+    </section>
+
+    <section class="pane" id="pane-image">
+      <h3>Couleur <button id="btn-grade-reset" class="btn small ghost">Réinitialiser</button></h3>
+      <div class="field"><label for="g-brightness">Luminosité</label><input id="g-brightness" type="range" min="-0.5" max="0.5" step="0.01"><output></output></div>
+      <div class="field"><label for="g-contrast">Contraste</label><input id="g-contrast" type="range" min="0.5" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-gamma">Tons moyens <small>plus de 1 = plus clair</small></label><input id="g-gamma" type="range" min="0.5" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-saturation">Saturation</label><input id="g-saturation" type="range" min="0" max="2" step="0.01"><output></output></div>
+      <div class="field"><label for="g-warmth">Chaleur <small>bleuté ↔ orangé</small></label><input id="g-warmth" type="range" min="-1" max="1" step="0.01"><output></output></div>
+      <div class="field"><label for="g-tint">Teinte <small>vert ↔ magenta</small></label><input id="g-tint" type="range" min="-1" max="1" step="0.01"><output></output></div>
+      <h3>Détail <small>appliqué à l'export, pas à l'aperçu</small></h3>
+      <div class="field"><label for="g-sharpen">Netteté</label><input id="g-sharpen" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <div class="field"><label for="g-denoise">Réduction du bruit</label><input id="g-denoise" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <p class="hint">Les réglages de couleur s'appliquent à l'aperçu et à l'export, avec le même calcul. La réduction du bruit est utile en faible lumière ; la netteté compense l'adoucissement dû à la réduction de l'image 360° en vidéo plate.</p>
+    </section>
+
+    <section class="pane" id="pane-stick">
+      <h3>Perche à selfie / nadir</h3>
+      <div class="field"><label for="k-mode">Traitement de la zone</label>
+        <select id="k-mode">
+          <option value="off">Aucun</option>
+          <option value="mirror">Reconstruction (miroir du contour)</option>
+          <option value="cover">Disque de couleur</option>
+        </select></div>
+      <div class="field"><label for="k-radius">Rayon de la zone <small>autour de l'axe de la perche</small></label><input id="k-radius" type="range" min="1" max="60" step="0.5"><output></output></div>
+      <div class="field" id="f-k-soft"><label for="k-softness">Bord adouci du disque</label><input id="k-softness" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <div class="field" id="f-k-color"><label for="k-color">Couleur du disque</label><input id="k-color" type="color" value="#202020"></div>
+      <details><summary>Axe de la perche (repère de la caméra)</summary>
+        <div class="field"><label for="k-yaw">Cap</label><input id="k-yaw" type="range" min="-180" max="180" step="0.5"><output></output></div>
+        <div class="field"><label for="k-pitch">Inclinaison <small>−90° = vers le bas</small></label><input id="k-pitch" type="range" min="-90" max="90" step="0.5"><output></output></div>
+        <button id="btn-stick-axis-reset" class="btn small ghost">Vers le bas</button>
+      </details>
+      <label class="check"><input type="checkbox" id="k-show"> Surligner la zone dans l'aperçu</label>
+      <div class="row"><button id="btn-look-nadir" class="btn small">Regarder le nadir (petite planète)</button></div>
+      <p class="hint">La perche est fixée à la caméra : la zone suit le boîtier, pas la scène, et reste en place quelles que soient la vue et la stabilisation. <b>Miroir</b> reconstitue la zone avec le décor qui l'entoure, <b>disque</b> la recouvre d'une couleur unie. Le réglage s'applique à l'aperçu, aux exports et aux captures, y compris à l'export 360°.</p>
     </section>
 
     <section class="pane" id="pane-stab">
@@ -177,6 +255,8 @@
       <tr><td><kbd>Espace</kbd></td><td>Lecture / pause</td></tr>
       <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Image précédente / suivante (Maj : 1 s)</td></tr>
       <tr><td><kbd>K</kbd></td><td>Ajouter un keyframe</td></tr>
+      <tr><td><kbd>R</kbd></td><td>Enregistrer le cadrage pendant la lecture (puis arrêter)</td></tr>
+      <tr><td><kbd>Échap</kbd></td><td>Annuler la désignation d'un sujet à suivre</td></tr>
       <tr><td><kbd>I</kbd> <kbd>O</kbd></td><td>Début / fin de l'export</td></tr>
       <tr><td>Double-clic</td><td>Recentrer la vue</td></tr>
     </table>

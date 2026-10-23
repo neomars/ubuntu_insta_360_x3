@@ -7,9 +7,12 @@
 use crate::calibration::Calibration;
 use crate::error::{export_err, Result};
 use crate::geometry::{Keyframe, Mat3, View, Ypr};
+use crate::grade::Grade;
 use crate::media::{probe_source, Layout, Source};
+use crate::multi::Multi;
 use crate::pipeline::{default_fov, ExportSettings};
 use crate::stabilize::{self, calibration_key, Orientation, StabMode};
+use crate::stick::Stick;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -51,6 +54,12 @@ pub struct State {
     pub keyframes: Vec<Keyframe>,
     pub stabilization: StabParams,
     pub orientation: Ypr,
+    /// Réglages d'image (luminosité, contraste, couleurs, netteté…).
+    pub grade: Grade,
+    /// Perche à selfie / nadir.
+    pub stick: Stick,
+    /// Plusieurs perspectives dans la même vidéo.
+    pub multi: Multi,
     /// Réglages d'export mémorisés (libres).
     pub export: Value,
 }
@@ -65,14 +74,28 @@ impl Default for State {
             keyframes: vec![],
             stabilization: StabParams::default(),
             orientation: Ypr::default(),
+            grade: Grade::default(),
+            stick: Stick::default(),
+            multi: Multi::default(),
             export: json!({}),
         }
     }
 }
 
 /// Clés de premier niveau acceptées par `update_state`.
-const STATE_KEYS: [&str; 8] =
-    ["calibration", "trim", "projection", "view", "keyframes", "stabilization", "orientation", "export"];
+const STATE_KEYS: [&str; 11] = [
+    "calibration",
+    "trim",
+    "projection",
+    "view",
+    "keyframes",
+    "stabilization",
+    "orientation",
+    "grade",
+    "stick",
+    "multi",
+    "export",
+];
 
 /// Surcharges des réglages de stabilisation (aperçu, CLI) : `None` = valeur de l'état du projet.
 #[derive(Debug, Clone, Default)]
@@ -221,6 +244,9 @@ impl Project {
         let mut next: State =
             serde_json::from_value(merged).map_err(|e| export_err(format!("Réglages invalides : {e}")))?;
         next.keyframes.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+        next.grade.validate()?;
+        next.stick.validate()?;
+        next.multi.validate()?;
         let file = self.state_file();
         let tmp = file.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&next)?)?;
@@ -330,6 +356,9 @@ impl Project {
         d.insert("keyframes".into(), serde_json::to_value(&s.keyframes)?);
         d.insert("view".into(), serde_json::to_value(s.view)?);
         d.insert("orientation".into(), serde_json::to_value(s.orientation)?);
+        d.insert("grade".into(), serde_json::to_value(s.grade)?);
+        d.insert("stick".into(), serde_json::to_value(&s.stick)?);
+        d.insert("multi".into(), serde_json::to_value(&s.multi)?);
         d.insert("start".into(), json!(s.trim.start));
         d.insert("end".into(), json!(s.trim.end));
         for extra in [Some(&s.export), overrides].into_iter().flatten() {
@@ -391,10 +420,24 @@ mod tests {
         serde_json::from_str(include_str!("../tests/golden/project.json")).unwrap()
     }
 
+    /// Chaque clé de `golden` se retrouve, égale, dans `actual` (qui peut en avoir de plus : réglages ajoutés
+    /// après le portage de la version Python, absents des valeurs de référence).
+    fn assert_contains(actual: &Value, golden: &Value, path: &str) {
+        match (actual, golden) {
+            (Value::Object(a), Value::Object(g)) => {
+                for (k, gv) in g {
+                    let av = a.get(k).unwrap_or_else(|| panic!("clé absente : {path}.{k}"));
+                    assert_contains(av, gv, &format!("{path}.{k}"));
+                }
+            }
+            _ => assert_eq!(actual, golden, "{path}"),
+        }
+    }
+
     #[test]
     fn default_state_has_the_python_shape() {
         let g = golden();
-        assert_eq!(serde_json::to_value(State::default()).unwrap(), g["default_state"]);
+        assert_contains(&serde_json::to_value(State::default()).unwrap(), &g["default_state"], "state");
         let back: State = serde_json::from_value(g["default_state"].clone()).unwrap();
         assert_eq!(back, State::default());
     }
@@ -486,7 +529,7 @@ mod tests {
         let p = open(home.path());
         let s = p
             .update_state(&json!({"keyframes": [
-                {"t": 2.0, "yaw": 10, "ease": "linear"},
+                {"t": 2.0, "yaw": 10, "ease": "linear", "zoom": 3},
                 {"t": 0.5, "fov": 50.0, "pitch": -5},
             ]}))
             .unwrap();
@@ -494,7 +537,9 @@ mod tests {
         assert_eq!((s.keyframes[0].t, s.keyframes[0].fov, s.keyframes[0].yaw), (0.5, Some(50.0), None));
         assert_eq!((s.keyframes[1].t, s.keyframes[1].yaw), (2.0, Some(10.0)));
         let json = serde_json::to_value(&s.keyframes).unwrap();
-        assert!(json[1].get("ease").is_none() && json[1].get("pitch").is_none());
+        assert!(json[1].get("zoom").is_none() && json[1].get("pitch").is_none(), "champs inconnus ignorés");
+        assert_eq!(json[1]["ease"], "linear", "l'interpolation d'un keyframe est conservée");
+        assert!(json[0].get("ease").is_none());
         // un patch invalide est refusé, l'état et le fichier restent intacts
         let before = std::fs::read_to_string(p.state_file()).unwrap();
         for bad in [
@@ -503,6 +548,14 @@ mod tests {
             json!({"view": {"fov": "large"}}),
             json!({"stabilization": {"mode": "zoom"}}),
             json!({"projection": 3}),
+            json!({"grade": {"contrast": 9}}),
+            json!({"stick": {"mode": "gomme"}}),
+            json!({"stick": {"radius": 99}}),
+            json!({"multi": {"layout": "mosaique"}}),
+            json!({"multi": {"gap": 6}}),
+            json!({"keyframes": [{"t": 1, "ease": "rebond"}]}),
+            json!({"multi": {"views": [{"projection": "cube"}]}}),
+            json!({"grade": {"saturation": "vive"}}),
         ] {
             let e = p.update_state(&bad).unwrap_err();
             assert!(crate::error::is_user_error(&e), "{bad} → {e}");

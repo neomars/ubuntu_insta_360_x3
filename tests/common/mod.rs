@@ -342,6 +342,32 @@ pub fn output_ray(proj: &str, u: f64, v: f64, fov_deg: f64, aspect: f64) -> Vec3
     }
 }
 
+/// Comme [`output_ray`], avec la distorsion `dist` de la projection plate (perspective générale, voir
+/// `docs/ARCHITECTURE.md`). L'angle est trouvé par dichotomie sur la formule *directe*
+/// `r = (d+1) sin θ / (d + cos θ)` : sans rapport avec la forme close du moteur.
+pub fn output_ray_d(proj: &str, u: f64, v: f64, fov_deg: f64, aspect: f64, dist: f64) -> Vec3 {
+    if proj != "flat" || dist <= 0.0 {
+        return output_ray(proj, u, v, fov_deg, aspect);
+    }
+    let g = |t: f64| (dist + 1.0) * t.sin() / (dist + t.cos());
+    let limit = if dist >= 1.0 { (-1.0 / dist).acos() } else { (-dist).acos() };
+    let half = (fov_deg.to_radians() / 2.0).min(limit * 0.999);
+    let (x, y) = (u, v * aspect);
+    let target = x.hypot(y) * g(half);
+    let (mut lo, mut hi) = (0.0f64, limit * 0.999_999);
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if g(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let theta = 0.5 * (lo + hi);
+    let phi = (-y).atan2(x);
+    Vec3::new(theta.sin() * phi.cos(), theta.sin() * phi.sin(), theta.cos())
+}
+
 /// Couleur de la texture dans la direction `d` (bilinéaire, raccord en longitude).
 pub fn texture_at(tex: &Texture, d: &Vec3) -> [f64; 3] {
     let lon = d.x.atan2(d.z);
@@ -364,19 +390,115 @@ pub fn texture_at(tex: &Texture, d: &Vec3) -> [f64; 3] {
 /// Ce que doit montrer une vue `proj` de `w x h` pixels (RGB) : la texture vue par une caméra d'orientation `cam`
 /// (caméra -> monde) à travers la vue `(yaw, pitch, roll, fov)`.
 pub fn expected_view(tex: &Texture, proj: &str, w: usize, h: usize, cam: &Mat3, view: (f64, f64, f64, f64)) -> Vec<u8> {
+    expected_view_d(tex, proj, w, h, cam, view, 0.0)
+}
+
+/// Comme [`expected_view`], avec la distorsion `dist` de la projection plate.
+pub fn expected_view_d(
+    tex: &Texture,
+    proj: &str,
+    w: usize,
+    h: usize,
+    cam: &Mat3,
+    view: (f64, f64, f64, f64),
+    dist: f64,
+) -> Vec<u8> {
     let m = cam * ypr_to_matrix(view.0, view.1, view.2);
     let aspect = h as f64 / w as f64;
     let mut out = vec![0u8; w * h * 3];
     for j in 0..h {
         for i in 0..w {
             let (u, v) = ((i as f64 + 0.5) / w as f64 * 2.0 - 1.0, (j as f64 + 0.5) / h as f64 * 2.0 - 1.0);
-            let c = texture_at(tex, &(m * output_ray(proj, u, v, view.3, aspect)));
+            let c = texture_at(tex, &(m * output_ray_d(proj, u, v, view.3, aspect, dist)));
             for k in 0..3 {
                 out[(j * w + i) * 3 + k] = (c[k] + 0.5) as u8;
             }
         }
     }
     out
+}
+
+/// Zone de la perche attendue (voir `src/stick.rs`) : ce que doit montrer la vue une fois la zone traitée.
+pub struct StickRef {
+    /// `"mirror"` ou `"cover"`.
+    pub mode: &'static str,
+    /// Demi-angle du cône (degrés) et adoucissement du disque de couleur.
+    pub radius: f64,
+    pub softness: f64,
+    /// Axe du cône dans le repère de la caméra (unitaire).
+    pub axis: Vec3,
+    /// Couleur du disque (RVB 0..255).
+    pub color: [f64; 3],
+}
+
+/// Comme [`expected_view_d`] (caméra immobile, stabilisation nulle : le repère de la caméra est celui du monde), avec
+/// la zone de la perche traitée. Le miroir est une rotation de Rodrigues dans le plan de l'axe et de la direction.
+pub fn expected_view_stick(
+    tex: &Texture,
+    proj: &str,
+    w: usize,
+    h: usize,
+    view: (f64, f64, f64, f64),
+    stick: &StickRef,
+) -> Vec<u8> {
+    let m = ypr_to_matrix(view.0, view.1, view.2);
+    let aspect = h as f64 / w as f64;
+    let rho = stick.radius.to_radians();
+    let rho_in = rho * (1.0 - stick.softness.max(0.02));
+    let mut out = vec![0u8; w * h * 3];
+    for j in 0..h {
+        for i in 0..w {
+            let (u, v) = ((i as f64 + 0.5) / w as f64 * 2.0 - 1.0, (j as f64 + 0.5) / h as f64 * 2.0 - 1.0);
+            let d = m * output_ray_d(proj, u, v, view.3, aspect, 0.0);
+            let angle = d.dot(&stick.axis).clamp(-1.0, 1.0).acos();
+            let (dir, alpha) = match stick.mode {
+                "mirror" if angle < rho && angle > 1e-6 => {
+                    let n = stick.axis.cross(&d).normalize();
+                    let t = 2.0 * rho - 2.0 * angle;
+                    (d * t.cos() + n.cross(&d) * t.sin(), 0.0)
+                }
+                "cover" => {
+                    let t = ((angle - rho_in) / (rho - rho_in)).clamp(0.0, 1.0);
+                    (d, 1.0 - t * t * (3.0 - 2.0 * t))
+                }
+                _ => (d, 0.0),
+            };
+            let c = texture_at(tex, &dir);
+            for k in 0..3 {
+                out[(j * w + i) * 3 + k] = (c[k] * (1.0 - alpha) + stick.color[k] * alpha + 0.5) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Le rectangle `(x, y, w, h)` d'une image RGB de largeur `width`.
+pub fn crop_rgb(img: &[u8], width: usize, (x, y, w, h): (usize, usize, usize, usize)) -> Vec<u8> {
+    (y..y + h).flat_map(|row| img[(row * width + x) * 3..(row * width + x + w) * 3].iter().copied()).collect()
+}
+
+/// Nombre de pixels « couleur de la perche » (magenta presque pur, que les formes aléatoires de la texture n'ont
+/// pratiquement jamais) d'une image RGB.
+pub fn magenta_count(img: &[u8]) -> usize {
+    img.chunks(3).filter(|p| p[0] > 225 && p[1] < 40 && p[2] > 225).count()
+}
+
+/// Écart absolu moyen sur le disque de rayon `r` (pixels) centré sur l'image, ou sur la couronne `r0..r1` si `ring`.
+pub fn disc_diff(a: &[u8], b: &[u8], w: usize, h: usize, r0: f64, r1: f64) -> f64 {
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let (mut sum, mut n) = (0.0, 0.0);
+    for y in 0..h {
+        for x in 0..w {
+            let r = (x as f64 + 0.5 - cx).hypot(y as f64 + 0.5 - cy);
+            if r >= r0 && r < r1 {
+                for k in 0..3 {
+                    sum += (f64::from(a[(y * w + x) * 3 + k]) - f64::from(b[(y * w + x) * 3 + k])).abs();
+                    n += 1.0;
+                }
+            }
+        }
+    }
+    sum / n
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +586,52 @@ pub fn avg_rgb(img: &[u8], w: usize, x: usize, y: usize, r: usize) -> [f64; 3] {
 /// Vrai si la couleur est « presque » `target` (écart max par canal).
 pub fn near(c: [f64; 3], target: [f64; 3], tol: f64) -> bool {
     c.iter().zip(&target).all(|(a, b)| (a - b).abs() <= tol)
+}
+
+/// Réglages de couleur de référence, écrits à part du moteur : (luminosité, contraste, saturation, tons moyens,
+/// chaleur, teinte). Calcul en RVB flottant dans l'espace Y'CbCr BT.709 (les valeurs de la spécification de
+/// `src/grade.rs`, réécrites ici pour que le test ne dépende pas du code qu'il vérifie).
+pub type GradeRef = (f64, f64, f64, f64, f64, f64);
+
+pub fn grade_rgb(img: &[u8], g: GradeRef) -> Vec<u8> {
+    let (brightness, contrast, saturation, gamma, warmth, tint) = g;
+    let (shift_cb, shift_cr) = (-0.08 * warmth + 0.051 * tint, 0.07 * warmth + 0.06 * tint);
+    img.chunks(3)
+        .flat_map(|px| {
+            let [r, gr, b] = [px[0], px[1], px[2]].map(|v| f64::from(v) / 255.0);
+            let y = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+            let (cb, cr) = ((b - y) / 1.8556, (r - y) / 1.5748);
+            let y = ((y.clamp(0.0, 1.0).powf(1.0 / gamma) - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0);
+            let cb = (cb * saturation + shift_cb).clamp(-0.5, 0.5);
+            let cr = (cr * saturation + shift_cr).clamp(-0.5, 0.5);
+            [y + 1.5748 * cr, y - 0.187324 * cb - 0.468124 * cr, y + 1.8556 * cb]
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        })
+        .collect()
+}
+
+/// Énergie des contours : écart moyen entre pixels voisins (horizontalement et verticalement) du canal vert.
+pub fn edge_energy(img: &[u8], w: usize, h: usize) -> f64 {
+    let g = |x: usize, y: usize| f64::from(img[(y * w + x) * 3 + 1]);
+    let mut sum = 0.0;
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            sum += (g(x + 1, y) - g(x, y)).abs() + (g(x, y + 1) - g(x, y)).abs();
+        }
+    }
+    sum / ((w - 1) * (h - 1)) as f64
+}
+
+/// Écart-type temporel moyen, par pixel et par canal, d'une suite d'images d'une scène immobile : le bruit.
+pub fn temporal_noise(frames: &[Vec<u8>]) -> f64 {
+    let n = frames.len() as f64;
+    let len = frames[0].len();
+    let mut total = 0.0;
+    for i in 0..len {
+        let mean = frames.iter().map(|f| f64::from(f[i])).sum::<f64>() / n;
+        total += (frames.iter().map(|f| (f64::from(f[i]) - mean).powi(2)).sum::<f64>() / n).sqrt();
+    }
+    total / len as f64
 }
 
 /// Processus dont la ligne de commande contient `needle` (Linux : /proc).

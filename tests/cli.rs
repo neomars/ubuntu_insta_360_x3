@@ -5,7 +5,7 @@ use common::*;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use x3studio::synth::{Motion, SynthOptions};
+use x3studio::synth::{Motion, Subject, SynthOptions};
 
 struct Env {
     dir: tempfile::TempDir,
@@ -523,4 +523,319 @@ fn the_gui_reports_startup_problems_without_panicking() {
     assert_eq!(r.status.code(), Some(1));
     // port invalide : erreur d'usage
     assert_eq!(e.x3(&["gui", "--port", "70000"]).status.code(), Some(2));
+}
+
+#[test]
+fn image_adjustments_are_options_checked_and_visible_in_the_commands() {
+    let e = Env::new();
+    let c = static_clip();
+    // netteté et bruit changent les filtres FFmpeg ; la couleur est appliquée par le moteur
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--sharpen", "0.5", "--denoise", "0.5"]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let out = text(&r.stdout);
+    assert!(out.contains("hqdn3d=4.000:3.000:6.000:4.500") && out.contains("unsharp=5:5:0.750:5:5:0"), "{out}");
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run"]);
+    let out = text(&r.stdout);
+    assert!(!out.contains("hqdn3d") && !out.contains("unsharp"), "sans réglage, aucun filtre en plus : {out}");
+    // une valeur négative s'écrit sans « = » ; hors bornes ou non numérique : erreur claire
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "--dry-run",
+        "--brightness",
+        "-0.2",
+        "--contrast",
+        "1.3",
+        "--saturation",
+        "0.5",
+        "--gamma",
+        "1.2",
+        "--warmth",
+        "-0.4",
+        "--tint",
+        "0.1",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    for (opt, value, word) in [
+        ("--brightness", "0.9", "luminosité"),
+        ("--contrast", "5", "contraste"),
+        ("--saturation", "-1", "saturation"),
+        ("--gamma", "0", "tons moyens"),
+        ("--warmth", "2", "chaleur"),
+        ("--tint", "-2", "teinte"),
+        ("--sharpen", "1.5", "netteté"),
+        ("--denoise", "-0.5", "bruit"),
+    ] {
+        let r = e.x3(&["reframe", p(&c.path), "--dry-run", opt, value]);
+        assert_eq!(r.status.code(), Some(1), "{opt} {value}");
+        assert!(text(&r.stderr).contains(word), "{opt} {value} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--gamma", "nan"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("Valeur invalide"), "{}", text(&r.stderr));
+    // l'export réel applique la correction (image plus claire qu'avec les réglages neutres)
+    let mean = |args: &[&str], name: &str| {
+        let out = e.out(name);
+        let mut a = vec!["snapshot", p(&c.path), "-o", p(&out), "--size", "160x90", "--t", "0.5"];
+        a.extend_from_slice(args);
+        let r = e.x3(&a);
+        assert!(r.status.success(), "{}", text(&r.stderr));
+        let (img, ..) = read_image(&out);
+        img.iter().map(|&v| f64::from(v)).sum::<f64>() / img.len() as f64
+    };
+    let (plain, bright) = (mean(&[], "plain.jpg"), mean(&["--brightness", "0.2"], "bright.jpg"));
+    assert!(bright > plain + 20.0, "{plain:.1} -> {bright:.1}");
+}
+
+#[test]
+fn the_selfie_stick_options_are_checked_and_applied() {
+    let e = Env::new();
+    let c = clip(
+        "stick",
+        SynthOptions { seconds: 1.0, fps: 30.0, lens: 480, motion: Motion::Static, stick: 10.0, ..Default::default() },
+    );
+    for (args, word) in [
+        (vec!["--stick", "mirror", "--stick-radius", "0.2"], "rayon"),
+        (vec!["--stick", "cover", "--stick-radius", "90"], "rayon"),
+        (vec!["--stick", "cover", "--stick-softness", "2"], "adoucissement"),
+        (vec!["--stick", "cover", "--stick-color", "rouge"], "couleur"),
+        (vec!["--stick", "mirror", "--stick-axis", "0,-120"], "inclinaison"),
+        (vec!["--stick", "mirror", "--stick-axis", "400,0"], "cap"),
+    ] {
+        let mut a = vec!["reframe", p(&c.path), "--dry-run"];
+        a.extend(args.iter().copied());
+        let r = e.x3(&a);
+        assert_eq!(r.status.code(), Some(1), "{args:?}");
+        assert!(text(&r.stderr).contains(word), "{args:?} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--stick", "gomme"]);
+    assert_eq!(r.status.code(), Some(2), "mode inconnu : erreur d'usage");
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--stick-axis", "10"]);
+    assert_eq!(r.status.code(), Some(2));
+    assert!(text(&r.stderr).contains("cap,inclinaison"), "{}", text(&r.stderr));
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "--dry-run",
+        "--stick",
+        "mirror",
+        "--stick-axis",
+        "0,-90",
+        "--stick-radius",
+        "15",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+
+    // la capture montre la perche sans traitement, plus rien avec
+    let shot = |name: &str, extra: &[&str]| {
+        let out = e.out(name);
+        let mut a = vec![
+            "snapshot",
+            p(&c.path),
+            "-o",
+            p(&out),
+            "--projection",
+            "fisheye",
+            "--pitch",
+            "-90",
+            "--fov",
+            "120",
+            "--size",
+            "480x480",
+            "--t",
+            "0.5",
+        ];
+        a.extend_from_slice(extra);
+        let r = e.x3(&a);
+        assert!(r.status.success(), "{}", text(&r.stderr));
+        read_image(&out).0
+    };
+    let plain = shot("plain.png", &[]);
+    assert!(magenta_count(&plain) > 3_000, "perche visible : {}", magenta_count(&plain));
+    let mirror = shot("mirror.png", &["--stick", "mirror", "--stick-radius", "20"]);
+    assert!(magenta_count(&mirror) < 30, "{}", magenta_count(&mirror));
+    let cover = shot("cover.png", &["--stick", "cover", "--stick-radius", "20", "--stick-color", "#00ff00"]);
+    assert!(magenta_count(&cover) < 30);
+    let centre = avg_rgb(&cover, 480, 240, 240, 3);
+    assert!(near(centre, [0.0, 255.0, 0.0], 30.0), "{centre:?}");
+}
+
+#[test]
+fn several_views_from_the_command_line() {
+    let e = Env::new();
+    let c = static_clip();
+    // avant et arrière côte à côte, sans rien d'autre à préciser
+    let out = e.out("side.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&out),
+        "--layout",
+        "side",
+        "--size",
+        "640x360",
+        "--end",
+        "0.5",
+        "--preset",
+        "ultrafast",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frame = read_frames(&out, 640, 360, "rgb24", None, Some(6)).swap_remove(3);
+    let tex = texture();
+    for (i, yaw) in [(0usize, 0.0), (1, 180.0)] {
+        let got = crop_rgb(&frame, 640, (i * 320, 0, 320, 360));
+        let want = expected_view(tex, "flat", 320, 360, &x3studio::geometry::Mat3::identity(), (yaw, 0.0, 0.0, 90.0));
+        let err = mean_abs_diff(&downscale_rgb(&got, 320, 360, 4).0, &downscale_rgb(&want, 320, 360, 4).0);
+        assert!(err < 10.0, "vue {} : écart {err:.2}", i + 1);
+    }
+    // les vues 2, 3… viennent d'un fichier JSON
+    let views = e.out("views.json");
+    std::fs::write(&views, r#"[{"projection": "fisheye", "view": {"yaw": 90, "fov": 160}}]"#).unwrap();
+    let out2 = e.out("pip.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&out2),
+        "--layout",
+        "pip",
+        "--views",
+        p(&views),
+        "--size",
+        "640x360",
+        "--end",
+        "0.5",
+        "--preset",
+        "ultrafast",
+        "--layout-gap",
+        "8",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frame = read_frames(&out2, 640, 360, "rgb24", None, Some(6)).swap_remove(3);
+    let rects = x3studio::multi::layout_rects(x3studio::multi::MultiLayout::Pip, 640, 360, 8);
+    let inset = rects[1];
+    let got = crop_rgb(&frame, 640, (inset.x as usize, inset.y as usize, inset.w as usize, inset.h as usize));
+    let want = expected_view(
+        tex,
+        "fisheye",
+        inset.w as usize,
+        inset.h as usize,
+        &x3studio::geometry::Mat3::identity(),
+        (90.0, 0.0, 0.0, 160.0),
+    );
+    let (w, h) = (inset.w as usize, inset.h as usize);
+    let err = mean_abs_diff(&downscale_rgb(&got, w, h, 4).0, &downscale_rgb(&want, w, h, 4).0);
+    assert!(err < 10.0, "incrustation : écart {err:.2}");
+    // erreurs claires
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--layout-gap", "6"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("multiple de 4"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "quad", "--size", "128x72"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("trop petite"), "{}", text(&r.stderr));
+    let bad = e.out("bad.json");
+    std::fs::write(&bad, "{pas un tableau").unwrap();
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--views", p(&bad)]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("Vues invalides"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--views", p(&e.out("absent.json"))]);
+    assert!(text(&r.stderr).contains("Vues illisibles"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "mosaique"]);
+    assert_eq!(r.status.code(), Some(2));
+}
+
+#[test]
+fn track_writes_keyframes_that_reframe_can_use() {
+    let e = Env::new();
+    let subject = Subject { radius: 7.0, from: (15.0, 5.0), to: (85.0, 15.0), wobble: 4.0, until: f64::INFINITY };
+    let c = clip(
+        "cli-subject",
+        SynthOptions {
+            seconds: 2.0,
+            fps: 30.0,
+            lens: 480,
+            motion: Motion::Static,
+            subject: Some(subject.clone()),
+            ..Default::default()
+        },
+    );
+    let (yaw, pitch) = subject.at(0.5, 2.0);
+    let out = e.out("suivi.json");
+    let r = e.x3(&[
+        "track",
+        p(&c.path),
+        "-o",
+        p(&out),
+        "--t",
+        "0.5",
+        "--yaw",
+        &yaw.to_string(),
+        "--pitch",
+        &pitch.to_string(),
+        "--size",
+        "12",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    assert_eq!(text(&r.stdout).trim(), out.to_str().unwrap());
+    assert!(text(&r.stderr).contains("Sujet suivi de 0.00 s"), "{}", text(&r.stderr));
+    let kfs: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert!(kfs.len() >= 2 && kfs.len() < 25, "{} keyframes", kfs.len());
+    assert!(kfs.iter().all(|k| k["ease"] == "linear"));
+    assert_eq!(kfs[0]["t"], 0.0);
+    assert!((kfs[0]["yaw"].as_f64().unwrap() - 15.0).abs() < 3.0, "{}", kfs[0]);
+    assert!(kfs.last().unwrap()["yaw"].as_f64().unwrap() > 75.0);
+    // sans -o : le JSON sur la sortie standard
+    let r = e.x3(&[
+        "track",
+        p(&c.path),
+        "--t",
+        "0.5",
+        "--yaw",
+        &yaw.to_string(),
+        "--pitch",
+        &pitch.to_string(),
+        "--no-backward",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let on_stdout: Vec<Value> = serde_json::from_str(&text(&r.stdout)).unwrap();
+    assert!(
+        (on_stdout[0]["t"].as_f64().unwrap() - 0.5).abs() < 0.04,
+        "pas de recul : la plage commence à l'instant désigné"
+    );
+    // le fichier sert tel quel à l'export recadré
+    let video = e.out("suivi.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&video),
+        "--keyframes",
+        p(&out),
+        "--size",
+        "320x180",
+        "--fov",
+        "60",
+        "--preset",
+        "ultrafast",
+        "--no-audio",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frames = read_frames(&video, 320, 180, "rgb24", None, None);
+    assert_eq!(frames.len(), 60);
+    // erreurs de paramètres
+    for (args, word) in [
+        (vec!["--yaw", "10", "--pitch", "120"], "inclinaison"),
+        (vec!["--yaw", "10", "--pitch", "0", "--size", "nan"], "Valeur invalide"),
+        (vec!["--yaw", "10", "--pitch", "0", "--end", "inf"], "Valeur invalide"),
+        (vec!["--yaw", "nan", "--pitch", "0"], "Valeur invalide"),
+    ] {
+        let mut a = vec!["track", p(&c.path), "--t", "0.5"];
+        a.extend_from_slice(&args);
+        let r = e.x3(&a);
+        assert_eq!(r.status.code(), Some(1), "{args:?}");
+        assert!(text(&r.stderr).contains(word), "{args:?} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["track", p(&c.path), "--yaw", "10", "--pitch", "0"]);
+    assert_eq!(r.status.code(), Some(2), "--t est obligatoire");
 }

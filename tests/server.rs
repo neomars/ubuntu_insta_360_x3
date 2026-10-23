@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use x3studio::app::App;
 use x3studio::server::start_test_server;
-use x3studio::synth::{Motion, SynthOptions};
+use x3studio::synth::{Motion, Subject, SynthOptions};
 
 struct Srv {
     base: String,
@@ -51,9 +51,13 @@ fn server() -> Srv {
     let app = App::new(Some(home.path().join("home")), Some(out.clone())).unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (addr, state, _handle) = rt.block_on(start_test_server(app.clone())).unwrap();
+    // Pas de connexion réutilisée : le serveur ferme parfois la connexion après une réponse donnée sans avoir lu le corps de
+    // la requête (404 avant l'extraction du JSON), et le client partagé pouvait alors envoyer la requête suivante sur une
+    // connexion déjà fermée (« Peer disconnected », au hasard du timing).
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
+        .max_idle_connections(0)
         .timeout_global(Some(Duration::from_secs(120)))
         .build()
         .into();
@@ -241,8 +245,12 @@ fn index_and_static_files() {
     // fichiers de l'interface
     let js = anon("/app.js", &[]);
     assert!(js.text().contains("createElement") && js.header("content-type").unwrap().starts_with("text/javascript"));
-    for (p, ct) in [("/viewer.js", "text/javascript"), ("/geometry.js", "text/javascript"), ("/style.css", "text/css")]
-    {
+    for (p, ct) in [
+        ("/viewer.js", "text/javascript"),
+        ("/geometry.js", "text/javascript"),
+        ("/recorder.js", "text/javascript"),
+        ("/style.css", "text/css"),
+    ] {
         let r = anon(p, &[]);
         assert!(r.status == 200 && r.header("content-type").unwrap().starts_with(ct) && !r.body.is_empty(), "{p}");
     }
@@ -673,4 +681,66 @@ fn bad_files_are_reported_not_crashed() {
     assert_eq!(s.status("POST", "/api/open", Some(json!({"path": dir.path()}))), 400, "un dossier n'est pas une vidéo");
     // le serveur répond toujours
     assert_eq!(s.status("GET", "/api/info", None), 200);
+}
+
+/// Suivi de sujet par l'API : refusé tant que l'aperçu n'est pas prêt, tâche `track`, résultat relu avec les keyframes.
+#[test]
+fn a_subject_can_be_tracked_through_the_api() {
+    let s = server();
+    let subject = Subject { radius: 7.0, from: (15.0, 5.0), to: (85.0, 15.0), wobble: 4.0, until: f64::INFINITY };
+    let path = clip(
+        "server-subject",
+        SynthOptions {
+            seconds: 2.0,
+            fps: 30.0,
+            lens: 480,
+            motion: Motion::Static,
+            subject: Some(subject.clone()),
+            ..Default::default()
+        },
+    )
+    .path;
+    let pid = s.call("POST", "/api/open", Some(json!({"path": path}))).json()["id"].as_str().unwrap().to_string();
+    let url = format!("/api/project/{pid}/track");
+    // pas de résultat tant qu'on n'a rien suivi
+    assert_eq!(s.get(&url).json(), json!({"ready": false}));
+    s.wait_jobs();
+    let (yaw, pitch) = subject.at(0.6, 2.0);
+    let body = json!({"t": 0.6, "yaw": yaw, "pitch": pitch, "size": 12, "backward": true});
+    // mauvaises requêtes
+    for (bad, word) in [
+        (json!({"yaw": 1, "pitch": 1}), "`t`"),
+        (json!({"t": 1, "pitch": 1}), "yaw"),
+        (json!({"t": 1, "yaw": 1}), "pitch"),
+        (json!({"t": 1, "yaw": 1, "pitch": 120}), "inclinaison"),
+    ] {
+        let r = s.call("POST", &url, Some(bad));
+        assert_eq!(r.status, 400, "{}", r.text());
+        assert!(r.text().contains(word), "{}", r.text());
+    }
+    s.wait_jobs();
+    let job = s.call("POST", &url, Some(body.clone())).json();
+    assert_eq!(job["kind"], "track");
+    assert!(job["title"].as_str().unwrap().starts_with("Suivi de sujet : "));
+    let jobs = s.wait_jobs();
+    let done = jobs.iter().find(|j| j["id"] == job["id"]).unwrap();
+    assert_eq!(done["state"], "done", "{done}");
+    let r = s.get(&url).json();
+    assert_eq!(r["job"], job["id"]);
+    assert_eq!(r["params"]["t0"], 0.6);
+    let samples = r["track"]["samples"].as_array().unwrap();
+    assert!(samples.len() >= 55, "{} échantillons", samples.len());
+    assert!(r["track"]["lost_after"].is_null() && r["track"]["lost_before"].is_null());
+    // le cap suivi croît comme celui du sujet (de 15° à 85°), et les keyframes le suivent
+    let first = samples.first().unwrap();
+    let last = samples.last().unwrap();
+    assert!((first["yaw"].as_f64().unwrap() - 15.0).abs() < 3.0, "{first}");
+    assert!(last["yaw"].as_f64().unwrap() > 75.0, "{last}");
+    let kfs = r["keyframes"].as_array().unwrap();
+    assert!(kfs.len() >= 2 && kfs.len() < 30);
+    assert!(kfs
+        .iter()
+        .all(|k| k["ease"] == "linear" && k["yaw"].is_number() && k["pitch"].is_number() && k.get("fov").is_none()));
+    // l'état du projet n'est pas touché : c'est à l'interface d'appliquer les keyframes
+    assert_eq!(s.get(&format!("/api/project/{pid}")).json()["state"]["keyframes"], json!([]));
 }

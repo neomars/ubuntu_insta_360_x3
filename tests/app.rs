@@ -287,3 +287,29 @@ fn a_low_resolution_lrv_gets_a_preview_of_its_own_size() {
     assert_eq!((info.w, info.h), (192, 96), "l'aperçu n'est pas agrandi à 1920×960");
     assert!(p.orientation().is_some(), "l'analyse du mouvement part de l'aperçu");
 }
+
+#[test]
+fn tracking_needs_the_preview_and_valid_parameters() {
+    let f = fixture();
+    let p = f.app.open_project(&shake(), false).unwrap();
+    let params = x3studio::tracker::TrackParams {
+        t0: 0.5,
+        yaw: 10.0,
+        pitch: 0.0,
+        size: 12.0,
+        start: 0.0,
+        end: 0.0,
+        backward: true,
+    };
+    let e = f.app.start_tracking(&p, params).expect_err("aperçu absent");
+    assert!(is_user_error(&e) && e.to_string().contains("aperçu"), "{e}");
+    for bad in [
+        x3studio::tracker::TrackParams { yaw: f64::NAN, ..params },
+        x3studio::tracker::TrackParams { pitch: 95.0, ..params },
+        x3studio::tracker::TrackParams { size: f64::INFINITY, ..params },
+    ] {
+        let e = f.app.start_tracking(&p, bad).expect_err("paramètres refusés");
+        assert!(is_user_error(&e) && !e.to_string().contains("aperçu"), "{e}");
+    }
+    assert!(!App::track_path(&p).exists());
+}

@@ -103,7 +103,8 @@ impl Ypr {
     }
 }
 
-/// Vue de la caméra virtuelle : `fov` = champ de vision horizontal en degrés.
+/// Vue de la caméra virtuelle : `fov` = champ de vision horizontal en degrés, `distortion` = forme de la
+/// perspective (0 = rectiligne, 1 = stéréographique « petite planète » ; projection plate seulement).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct View {
@@ -111,11 +112,12 @@ pub struct View {
     pub pitch: f64,
     pub roll: f64,
     pub fov: f64,
+    pub distortion: f64,
 }
 
 impl Default for View {
     fn default() -> Self {
-        View { yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 90.0 }
+        View { yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 90.0, distortion: 0.0 }
     }
 }
 
@@ -125,8 +127,19 @@ impl View {
     }
 }
 
+/// Interpolation du segment qui part d'un keyframe vers le suivant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ease {
+    /// Départ et arrivée en douceur (smoothstep) : le défaut.
+    #[default]
+    Smooth,
+    /// Vitesse constante : les keyframes enregistrés pendant la lecture, qui suivent déjà le mouvement de la main.
+    Linear,
+}
+
 /// Keyframe : instant `t` (secondes, temps source) ; un champ absent reprend la valeur de la vue de base.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Keyframe {
     pub t: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,11 +150,24 @@ pub struct Keyframe {
     pub roll: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fov: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distortion: Option<f64>,
+    /// Interpolation du segment qui commence à ce keyframe (`smooth` si absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<Ease>,
 }
 
 impl Keyframe {
     pub fn full(t: f64, v: &View) -> Self {
-        Keyframe { t, yaw: Some(v.yaw), pitch: Some(v.pitch), roll: Some(v.roll), fov: Some(v.fov) }
+        Keyframe {
+            t,
+            yaw: Some(v.yaw),
+            pitch: Some(v.pitch),
+            roll: Some(v.roll),
+            fov: Some(v.fov),
+            distortion: Some(v.distortion),
+            ease: None,
+        }
     }
     fn view(&self, base: &View) -> View {
         View {
@@ -149,6 +175,7 @@ impl Keyframe {
             pitch: self.pitch.unwrap_or(base.pitch),
             roll: self.roll.unwrap_or(base.roll),
             fov: self.fov.unwrap_or(base.fov),
+            distortion: self.distortion.unwrap_or(base.distortion),
         }
     }
 }
@@ -158,8 +185,8 @@ fn smoothstep(x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// Vue à l'instant `t` : interpolation douce (smoothstep) entre keyframes ; le yaw suit le chemin
-/// angulaire le plus court ; hors de l'intervalle la vue des extrémités est maintenue ; sans
+/// Vue à l'instant `t` : interpolation entre keyframes, douce (smoothstep) ou linéaire selon le keyframe de départ ;
+/// le cap et le roulis suivent le chemin angulaire le plus court ; hors de l'intervalle la vue des extrémités est maintenue ; sans
 /// keyframe, `base`. Miroir de `web/geometry.js::interpolateView`.
 pub fn interpolate_view(keyframes: &[Keyframe], t: f64, base: &View) -> View {
     if keyframes.is_empty() {
@@ -177,13 +204,18 @@ pub fn interpolate_view(keyframes: &[Keyframe], t: f64, base: &View) -> View {
         let (a, b) = (w[0], w[1]);
         if a.t <= t && t <= b.t {
             let span = b.t - a.t;
-            let u = if span > 0.0 { smoothstep((t - a.t) / span) } else { 1.0 };
+            let x = if span > 0.0 { (t - a.t) / span } else { 1.0 };
+            let u = match a.ease.unwrap_or_default() {
+                Ease::Smooth => smoothstep(x),
+                Ease::Linear => x.clamp(0.0, 1.0),
+            };
             let (va, vb) = (a.view(base), b.view(base));
             return View {
                 yaw: va.yaw + wrap180(vb.yaw - va.yaw) * u,
                 pitch: va.pitch + (vb.pitch - va.pitch) * u,
-                roll: va.roll + (vb.roll - va.roll) * u,
+                roll: va.roll + wrap180(vb.roll - va.roll) * u,
                 fov: va.fov + (vb.fov - va.fov) * u,
+                distortion: va.distortion + (vb.distortion - va.distortion) * u,
             };
         }
     }
@@ -247,8 +279,8 @@ mod tests {
     #[test]
     fn interpolation() {
         let kfs = [
-            Keyframe::full(1.0, &View { yaw: 170.0, pitch: 0.0, roll: 0.0, fov: 90.0 }),
-            Keyframe::full(3.0, &View { yaw: -170.0, pitch: 20.0, roll: 0.0, fov: 50.0 }),
+            Keyframe::full(1.0, &View { yaw: 170.0, fov: 90.0, ..View::default() }),
+            Keyframe::full(3.0, &View { yaw: -170.0, pitch: 20.0, fov: 50.0, distortion: 1.0, ..View::default() }),
         ];
         let base = View::default();
         assert_eq!(interpolate_view(&kfs, 0.0, &base).yaw, 170.0);
@@ -256,10 +288,31 @@ mod tests {
         let mid = interpolate_view(&kfs, 2.0, &base);
         assert!((mid.yaw.abs() - 180.0).abs() < 1e-9, "chemin le plus court via 180° : {}", mid.yaw);
         assert!((mid.pitch - 10.0).abs() < 1e-9 && (mid.fov - 70.0).abs() < 1e-9);
+        assert!((mid.distortion - 0.5).abs() < 1e-9, "la distorsion s'interpole comme le champ : {}", mid.distortion);
+        // le roulis est cyclique comme le cap : de 170° à -170°, 20° par la voie courte
+        let spin = [
+            Keyframe::full(0.0, &View { roll: 170.0, ..View::default() }),
+            Keyframe::full(2.0, &View { roll: -170.0, ..View::default() }),
+        ];
+        assert!((interpolate_view(&spin, 1.0, &base).roll.abs() - 180.0).abs() < 1e-9);
+        // un segment linéaire : à mi-parcours, la moyenne ; à 25 %, le quart (le smoothstep donnerait 15,6 %)
+        let linear = [
+            Keyframe {
+                ease: Some(Ease::Linear),
+                ..Keyframe::full(0.0, &View { yaw: 0.0, fov: 100.0, ..View::default() })
+            },
+            Keyframe::full(4.0, &View { yaw: 80.0, fov: 60.0, ..View::default() }),
+        ];
+        let q = interpolate_view(&linear, 1.0, &base);
+        assert!((q.yaw - 20.0).abs() < 1e-9 && (q.fov - 90.0).abs() < 1e-9, "{q:?}");
+        // l'interpolation d'un segment est celle de son keyframe de départ, pas d'arrivée
+        let back = [linear[1], Keyframe { ease: Some(Ease::Linear), ..Keyframe::full(8.0, &View::default()) }];
+        let s = interpolate_view(&back, 5.0, &base);
+        assert!((s.yaw - (80.0 - 80.0 * (0.25 * 0.25 * (3.0 - 0.5)))).abs() < 1e-9, "{s:?}");
         let only_fov = View { fov: 77.0, ..View::default() };
         assert_eq!(interpolate_view(&[], 5.0, &only_fov).fov, 77.0);
         // champ absent d'un keyframe : valeur de la vue de base
-        let partial = [Keyframe { t: 0.0, yaw: Some(40.0), pitch: None, roll: None, fov: None }];
+        let partial = [Keyframe { t: 0.0, yaw: Some(40.0), ..Default::default() }];
         let v = interpolate_view(&partial, 1.0, &View { pitch: 7.0, ..View::default() });
         assert_eq!((v.yaw, v.pitch), (40.0, 7.0));
     }
@@ -275,5 +328,9 @@ mod tests {
         let k: Keyframe = serde_json::from_str(r#"{"t": 1.5, "yaw": 10, "fov": 70}"#).unwrap();
         assert_eq!((k.t, k.yaw, k.pitch, k.fov), (1.5, Some(10.0), None, Some(70.0)));
         assert_eq!(serde_json::to_string(&k).unwrap(), r#"{"t":1.5,"yaw":10.0,"fov":70.0}"#);
+        let k: Keyframe = serde_json::from_str(r#"{"t": 2, "yaw": 5, "ease": "linear"}"#).unwrap();
+        assert_eq!(k.ease, Some(Ease::Linear));
+        assert_eq!(serde_json::to_string(&k).unwrap(), r#"{"t":2.0,"yaw":5.0,"ease":"linear"}"#);
+        assert!(serde_json::from_str::<Keyframe>(r#"{"t": 2, "ease": "rebond"}"#).is_err());
     }
 }

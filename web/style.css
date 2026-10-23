@@ -78,8 +78,8 @@ small { color: var(--muted); font-weight: 400; }
 
 /* panneau */
 .panel { border-left: 1px solid var(--line); background: var(--bg2); display: flex; flex-direction: column; min-height: 0; }
-.tabs { display: flex; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.tab { flex: 1 1 auto; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 5px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
+.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.tab { flex: 1 1 auto; background: none; border: 0; border-bottom: 2px solid transparent; padding: 9px 6px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
 .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
 .badge { background: var(--accent); color: var(--accent-fg); border-radius: 99px; padding: 0 6px; font-size: 11px; }
 .pane { display: none; padding: 14px 16px 24px; overflow-y: auto; flex: 1; }
@@ -140,3 +140,9 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-bottom-width
 .vhid { position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
 [hidden] { display: none !important; }
 .field > .btn.small { margin-top: 4px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.tile-outline { position: absolute; border: 2px solid var(--accent); box-shadow: 0 0 0 1px rgba(0, 0, 0, .5); pointer-events: none; border-radius: 2px; }
+.hud-tc { top: 10px; left: 50%; transform: translateX(-50%); }
+#hud-rec { background: rgba(200, 30, 30, .85); color: #fff; padding: 2px 10px; border-radius: 99px; font-weight: 650; letter-spacing: .04em; animation: rec-blink 1.2s steps(2, jump-none) infinite; }
+@keyframes rec-blink { 50% { opacity: .55; } }
+.btn.rec { background: #c0392b; color: #fff; border-color: transparent; }

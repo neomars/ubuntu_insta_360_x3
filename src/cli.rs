@@ -7,10 +7,13 @@ use crate::app::App;
 use crate::calibration::Calibration;
 use crate::error::{export_err, is_cancelled, is_user_error, Result};
 use crate::geometry::{Keyframe, Mat3, Ypr};
+use crate::grade::Grade;
 use crate::media::{probe_source, Layout};
+use crate::multi::{Multi, MultiLayout, TileView};
 use crate::pipeline::{self, default_fov, ExportSettings};
 use crate::project::{Project, StabOverride};
 use crate::stabilize::StabMode;
+use crate::stick::{Stick, StickMode};
 use crate::synth::{make_synthetic_insv, Motion, SynthOptions};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -48,6 +51,8 @@ enum Cmd {
     Equirect(EquirectArgs),
     /// Enregistre une image (JPEG ou PNG) de la vue
     Snapshot(SnapshotArgs),
+    /// Suit un sujet et écrit les keyframes qui le gardent au centre (à passer à `reframe --keyframes`)
+    Track(TrackArgs),
     /// Génère un .insv synthétique pour essayer le logiciel sans caméra
     Demo(DemoArgs),
 }
@@ -125,6 +130,45 @@ struct ExportArgs {
     /// Dossier de sortie par défaut
     #[arg(long)]
     output_dir: Option<PathBuf>,
+    /// Luminosité, de -0,5 à 0,5
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    brightness: f64,
+    /// Contraste, de 0,5 à 2
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    contrast: f64,
+    /// Saturation, de 0 (noir et blanc) à 2
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    saturation: f64,
+    /// Tons moyens, de 0,5 à 2 (plus de 1 = plus clair)
+    #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+    gamma: f64,
+    /// Chaleur, de -1 (bleuté) à 1 (orangé)
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    warmth: f64,
+    /// Teinte, de -1 (vert) à 1 (magenta)
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    tint: f64,
+    /// Netteté, de 0 à 1
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    sharpen: f64,
+    /// Réduction du bruit, de 0 à 1
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    denoise: f64,
+    /// Perche à selfie / nadir : `mirror` (reconstruction par réflexion) ou `cover` (disque de couleur)
+    #[arg(long, default_value = "off", value_parser = ["off", "mirror", "cover"])]
+    stick: String,
+    /// Demi-angle (°) de la zone de la perche, de 1 à 60
+    #[arg(long, default_value_t = 20.0, allow_hyphen_values = true)]
+    stick_radius: f64,
+    /// Adoucissement du bord du disque de couleur, de 0 à 1
+    #[arg(long, default_value_t = 0.3, allow_hyphen_values = true)]
+    stick_softness: f64,
+    /// Axe de la perche dans le repère de la caméra : cap,inclinaison (°) ; par défaut 0,-90 (vers le bas)
+    #[arg(long, value_parser = parse_pair, allow_hyphen_values = true)]
+    stick_axis: Option<(f64, f64)>,
+    /// Couleur du disque (#rrggbb)
+    #[arg(long, default_value = "#202020")]
+    stick_color: String,
 }
 
 /// Options de la vue de la caméra virtuelle.
@@ -148,6 +192,20 @@ struct ViewArgs {
     /// Champ horizontal (°) ; défaut selon la projection
     #[arg(long, default_value_t = 0.0)]
     fov: f64,
+    /// Distorsion de la perspective plate, de 0 (rectiligne) à 2 ; 1 = petite planète
+    #[arg(long, default_value_t = 0.0)]
+    distortion: f64,
+    /// Plusieurs vues dans la même vidéo : `side` (côte à côte), `stack` (haut/bas), `pip` (incrustation), `trio`
+    /// (une grande, deux petites) ou `quad` (2 x 2). La vue 1 est celle des options ci-dessus
+    #[arg(long, default_value = "single", value_parser = ["single", "side", "stack", "pip", "trio", "quad"])]
+    layout: String,
+    /// Écart entre les vues (px, multiple de 4, 0 à 40)
+    #[arg(long, default_value_t = 0)]
+    layout_gap: u32,
+    /// Fichier JSON des vues 2, 3… : [{projection, view: {yaw, pitch, roll, fov, distortion}, keyframes: [...]}, ...].
+    /// Par défaut, les vues sont réparties sur le tour (côte à côte : avant et arrière)
+    #[arg(long)]
+    views: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -182,6 +240,51 @@ struct SnapshotArgs {
 }
 
 #[derive(Args, Debug)]
+struct TrackArgs {
+    /// Fichier .insv (ou vidéo 360° équirectangulaire)
+    input: PathBuf,
+    /// Fichier JSON des keyframes (défaut : sortie standard)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Instant (s) où le sujet est désigné
+    #[arg(long)]
+    t: f64,
+    /// Cap du sujet (°) à cet instant, dans le repère de la vue (celui de `reframe --yaw`)
+    #[arg(long, allow_hyphen_values = true)]
+    yaw: f64,
+    /// Inclinaison du sujet (°) à cet instant
+    #[arg(long, allow_hyphen_values = true)]
+    pitch: f64,
+    /// Taille apparente du sujet (°) : de 3 à 40
+    #[arg(long, default_value_t = 12.0)]
+    size: f64,
+    /// Début de la plage suivie (s)
+    #[arg(long, default_value_t = 0.0)]
+    start: f64,
+    /// Fin de la plage suivie (s, 0 = jusqu'à la fin)
+    #[arg(long, default_value_t = 0.0)]
+    end: f64,
+    /// Ne suit pas vers l'arrière (avant l'instant désigné)
+    #[arg(long)]
+    no_backward: bool,
+    /// Stabilisation à prendre en compte : la même que pour l'export qui utilisera les keyframes
+    #[arg(long, default_value = "off", value_parser = ["off", "smooth", "lock", "horizon"])]
+    stabilize: String,
+    /// Lissage de la stabilisation (s)
+    #[arg(long, default_value_t = 1.0)]
+    strength: f64,
+    /// Lissage du cap en mode horizon (s)
+    #[arg(long, default_value_t = 1.5)]
+    heading: f64,
+    /// Orientation : cap,inclinaison,roulis (°), comme pour l'export
+    #[arg(long, value_parser = parse_triplet)]
+    orient: Option<Ypr>,
+    /// JSON de calibration des objectifs
+    #[arg(long)]
+    calibration: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct DemoArgs {
     /// Fichier .insv à créer
     output: PathBuf,
@@ -194,12 +297,25 @@ struct DemoArgs {
     /// Mouvement de la caméra
     #[arg(long, default_value = "shake", value_parser = ["shake", "pan", "static"])]
     motion: String,
+    /// Ajoute un sujet mobile (un disque orange et cyan qui traverse la scène) pour essayer le suivi de sujet
+    #[arg(long)]
+    subject: bool,
 }
 
 fn parse_size(txt: &str) -> std::result::Result<(u32, u32), String> {
     let bad = || "format attendu : LARGEURxHAUTEUR (ex. 1920x1080)".to_string();
     let (w, h) = txt.to_lowercase().split_once('x').map(|(w, h)| (w.to_string(), h.to_string())).ok_or_else(bad)?;
     Ok((w.trim().parse().map_err(|_| bad())?, h.trim().parse().map_err(|_| bad())?))
+}
+
+fn parse_pair(txt: &str) -> std::result::Result<(f64, f64), String> {
+    let bad = || "format attendu : cap,inclinaison (ex. 0,-90)".to_string();
+    let v: Vec<f64> =
+        txt.split(',').map(|p| p.trim().parse::<f64>().map_err(|_| bad())).collect::<std::result::Result<_, _>>()?;
+    match v[..] {
+        [a, b] if v.iter().all(|x| x.is_finite()) => Ok((a, b)),
+        _ => Err(bad()),
+    }
 }
 
 fn parse_triplet(txt: &str) -> std::result::Result<Ypr, String> {
@@ -293,19 +409,66 @@ fn settings(args: &ExportArgs) -> ExportSettings {
         crf: args.crf,
         preset: args.preset.clone(),
         audio: !args.no_audio,
+        grade: Grade {
+            brightness: args.brightness,
+            contrast: args.contrast,
+            saturation: args.saturation,
+            gamma: args.gamma,
+            warmth: args.warmth,
+            tint: args.tint,
+            sharpen: args.sharpen,
+            denoise: args.denoise,
+        },
+        stick: Stick {
+            mode: match args.stick.as_str() {
+                "mirror" => StickMode::Mirror,
+                "cover" => StickMode::Cover,
+                _ => StickMode::Off,
+            },
+            radius: args.stick_radius,
+            softness: args.stick_softness,
+            yaw: args.stick_axis.map_or(0.0, |a| a.0),
+            pitch: args.stick_axis.map_or(-90.0, |a| a.1),
+            color: args.stick_color.clone(),
+        },
         ..Default::default()
     }
 }
 
 fn view_settings(base: ExportSettings, v: &ViewArgs) -> Result<ExportSettings> {
-    check_finite(&[("--yaw", v.yaw), ("--pitch", v.pitch), ("--roll", v.roll), ("--fov", v.fov)])?;
+    check_finite(&[
+        ("--yaw", v.yaw),
+        ("--pitch", v.pitch),
+        ("--roll", v.roll),
+        ("--fov", v.fov),
+        ("--distortion", v.distortion),
+    ])?;
+    if !(0.0..=pipeline::MAX_DISTORTION).contains(&v.distortion) {
+        return Err(export_err(format!("La distorsion doit être comprise entre 0 et {}.", pipeline::MAX_DISTORTION)));
+    }
+    if v.distortion != 0.0 && v.projection != "flat" {
+        return Err(export_err("La distorsion ne s'applique qu'à la projection plate (--projection flat)."));
+    }
     let fov = if v.fov != 0.0 { v.fov } else { default_fov(&v.projection) };
+    let multi = Multi {
+        layout: serde_json::from_value(json!(v.layout)).unwrap_or(MultiLayout::Single),
+        gap: v.layout_gap,
+        views: match &v.views {
+            Some(file) => serde_json::from_str::<Vec<TileView>>(
+                &std::fs::read_to_string(file)
+                    .map_err(|e| export_err(format!("Vues illisibles ({}) : {e}", file.display())))?,
+            )
+            .map_err(|e| export_err(format!("Vues invalides ({}) : {e}", file.display())))?,
+            None => vec![],
+        },
+    };
     Ok(ExportSettings {
+        multi,
         mode: "reframe".into(),
         projection: v.projection.clone(),
         width: v.size.0,
         height: v.size.1,
-        view: json!({ "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": fov }),
+        view: json!({ "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": fov, "distortion": v.distortion }),
         ..base
     })
 }
@@ -334,6 +497,16 @@ fn run_export(
         ("--strength", args.strength),
         ("--heading", args.heading),
         ("--t", snapshot_t.unwrap_or(0.0)),
+        ("--brightness", args.brightness),
+        ("--contrast", args.contrast),
+        ("--saturation", args.saturation),
+        ("--gamma", args.gamma),
+        ("--warmth", args.warmth),
+        ("--tint", args.tint),
+        ("--sharpen", args.sharpen),
+        ("--denoise", args.denoise),
+        ("--stick-radius", args.stick_radius),
+        ("--stick-softness", args.stick_softness),
     ])?;
     let stab = stab_matrices(p, args)?;
     let ext = if snapshot_t.is_some() { "jpg" } else { "mp4" };
@@ -434,16 +607,94 @@ fn cmd_snapshot(a: SnapshotArgs, cancel: &AtomicBool) -> Result<()> {
     run_export(&app, &p, &s, &a.export, Some(a.t), cancel)
 }
 
+fn cmd_track(a: TrackArgs, cancel: &AtomicBool) -> Result<()> {
+    check_finite(&[
+        ("--t", a.t),
+        ("--yaw", a.yaw),
+        ("--pitch", a.pitch),
+        ("--size", a.size),
+        ("--start", a.start),
+        ("--end", a.end),
+        ("--strength", a.strength),
+        ("--heading", a.heading),
+    ])?;
+    let mode: StabMode = a.stabilize.parse()?;
+    let app = App::new(None, None)?;
+    let p = app.open_project(&a.input, false)?;
+    if let Some(file) = &a.calibration {
+        let c = Calibration::load(file)
+            .map_err(|e| export_err(format!("Calibration illisible ({}) : {e}", file.display())))?;
+        p.update_state(&json!({ "calibration": c }))?;
+    }
+    let progress = Progress::new();
+    app.prepare_sync(&p, mode != StabMode::Off, &|label, f| progress.report(label, f), cancel)?;
+    let stab = (mode != StabMode::Off || a.orient.is_some()).then(|| {
+        p.stab_matrices(&StabOverride {
+            mode: Some(mode),
+            strength: Some(a.strength),
+            heading_strength: Some(a.heading),
+            orientation: Some(a.orient.unwrap_or_default()),
+            start: Some(a.start),
+        })
+    });
+    let duration = p.src.duration;
+    let params = crate::tracker::TrackParams {
+        t0: a.t.clamp(0.0, duration),
+        yaw: a.yaw,
+        pitch: a.pitch,
+        size: a.size.clamp(crate::tracker::SIZE_RANGE.0, crate::tracker::SIZE_RANGE.1),
+        start: a.start.max(0.0),
+        end: if a.end > a.t { a.end.min(duration) } else { duration },
+        backward: !a.no_backward,
+    };
+    if !(-90.0..=90.0).contains(&params.pitch) {
+        return Err(export_err("L'inclinaison du sujet doit être comprise entre -90 et 90°."));
+    }
+    let track = crate::tracker::track_video(
+        &p.src,
+        &p.calibration(),
+        &p.proxy_path(),
+        stab.flatten().as_deref(),
+        &params,
+        &|f| progress.report("suivi", f),
+        cancel,
+    )?;
+    let keyframes = crate::tracker::samples_to_keyframes(&track.samples, crate::tracker::KEYFRAME_TOLERANCE);
+    let (first, last) = (track.samples.first().map_or(0.0, |s| s.t), track.samples.last().map_or(0.0, |s| s.t));
+    eprintln!(
+        "Sujet suivi de {first:.2} s à {last:.2} s : {} keyframes{}.",
+        keyframes.len(),
+        match (track.lost_before, track.lost_after) {
+            (None, None) => String::new(),
+            (b, f) => format!(
+                " (sujet perdu{}{})",
+                b.map_or(String::new(), |t| format!(" avant {t:.2} s")),
+                f.map_or(String::new(), |t| format!(" à partir de {t:.2} s"))
+            ),
+        }
+    );
+    let text = serde_json::to_string_pretty(&keyframes)?;
+    match &a.output {
+        Some(file) => {
+            std::fs::write(file, text + "\n")?;
+            println!("{}", file.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 fn cmd_demo(a: DemoArgs) -> Result<()> {
     let motion: Motion = a.motion.parse()?;
     eprintln!("Génération de {} ({:.0} s, mouvement « {} »)…", a.output.display(), a.seconds, a.motion);
-    let opt = SynthOptions { seconds: a.seconds, lens: a.lens, motion, ..Default::default() };
+    let subject = a.subject.then(crate::synth::Subject::demo);
+    let opt = SynthOptions { seconds: a.seconds, lens: a.lens, motion, subject, ..Default::default() };
     make_synthetic_insv(&a.output, &opt, None)?;
     println!("{}", a.output.display());
     Ok(())
 }
 
-const SUBCOMMANDS: [&str; 6] = ["gui", "probe", "reframe", "equirect", "snapshot", "demo"];
+const SUBCOMMANDS: [&str; 7] = ["gui", "probe", "reframe", "equirect", "snapshot", "track", "demo"];
 
 /// `x3studio` seul ou `x3studio fichier.insv` ouvre l'interface web.
 fn with_default_gui(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -478,6 +729,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Cmd::Reframe(a) => cmd_reframe(a, &cancel),
         Cmd::Equirect(a) => cmd_equirect(a, &cancel),
         Cmd::Snapshot(a) => cmd_snapshot(a, &cancel),
+        Cmd::Track(a) => cmd_track(a, &cancel),
         Cmd::Demo(a) => cmd_demo(a),
     };
     match result {
@@ -588,6 +840,30 @@ mod tests {
         };
         assert_eq!(b.t, 2.5);
         assert_eq!(view_settings(settings(&b.export), &b.view).unwrap().view["fov"].as_f64(), Some(180.0));
+        // distorsion : transmise à la vue, bornée, réservée à la projection plate
+        let Cmd::Reframe(r) =
+            parse(&["x3studio", "reframe", "v.insv", "--distortion", "0.5", "--fov", "130"]).unwrap().cmd
+        else {
+            panic!()
+        };
+        let s = view_settings(settings(&r.export), &r.view).unwrap();
+        assert_eq!((s.view["distortion"].as_f64(), s.view["fov"].as_f64()), (Some(0.5), Some(130.0)));
+        for (args, needle) in [
+            (&["x3studio", "reframe", "v.insv", "--distortion", "3"][..], "entre 0 et 2"),
+            (&["x3studio", "reframe", "v.insv", "--distortion", "nan"][..], "--distortion"),
+            (
+                &["x3studio", "reframe", "v.insv", "--distortion", "1", "--projection", "fisheye"][..],
+                "projection plate",
+            ),
+        ] {
+            let Cmd::Reframe(r) = parse(args).unwrap().cmd else { panic!() };
+            let e = view_settings(settings(&r.export), &r.view).unwrap_err();
+            assert!(e.to_string().contains(needle), "{args:?} : {e}");
+        }
+        assert!(
+            parse(&["x3studio", "reframe", "v.insv", "--distortion", "-1"]).is_err(),
+            "valeur négative : option invalide"
+        );
         let d = settings(&b.export);
         assert_eq!(
             (d.start, d.end, d.speed, d.fps, d.codec.as_str(), d.preset.as_str(), d.audio),
