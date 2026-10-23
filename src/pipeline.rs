@@ -986,6 +986,9 @@ fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &Atomi
     } else {
         vec![]
     };
+    // fond des écarts entre les vues : les tampons de sortie sont recyclés et ont déjà reçu les réglages d'image, qui
+    // ne doivent s'appliquer qu'une fois sur chaque image
+    let black = if plan.tiles.len() > 1 { black_frame(ow, oh) } else { vec![] };
     let mut dec = Proc::spawn(&plan.decoder, Stdio::null(), Stdio::piped())?;
     let mut enc = Proc::spawn(&plan.encoder, Stdio::piped(), Stdio::null())?;
     let mut dec_out = dec.child.stdout.take().ok_or_else(|| export_err("Sortie du décodeur indisponible."))?;
@@ -1029,6 +1032,7 @@ fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &Atomi
             if let [only] = &plan.tiles[..] {
                 only.renderer.render_with(&frame, &only.mats[done], only.fovs[done], only.dists[done], &mut out);
             } else {
+                out.copy_from_slice(&black);
                 for (tile, buf) in plan.tiles.iter().zip(tile_frames.iter_mut()) {
                     tile.renderer.render_with(&frame, &tile.mats[done], tile.fovs[done], tile.dists[done], buf);
                     blit_i420(buf, tile.rect, &mut out, ow, oh);

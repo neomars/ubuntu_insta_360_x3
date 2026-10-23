@@ -777,6 +777,20 @@ describe('interface X3 Studio Local', () => {
       });
       await settle(page);
       await page.click('#btn-rec');
+      // pendant l'enregistrement, la vue filmée, sa projection et la disposition ne changent pas
+      const gl = await page.locator('#gl').boundingBox();
+      await page.mouse.click(gl.x + gl.width * 0.25, gl.y + gl.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1, 'un clic sur l\'autre vue ne change pas la vue filmée');
+      await page.click('.tab[data-tab=reframe]');
+      await page.selectOption('#proj', 'fisheye');
+      assert.equal(await page.inputValue('#proj'), 'flat', 'la liste des projections revient à la projection de la vue filmée');
+      await page.click('#v-presets [data-preset=fisheye]');
+      assert.equal(await page.evaluate('window.__x3.S.st.multi.views[0].projection'), 'flat');
+      await page.click('.tab[data-tab=views]');
+      await page.selectOption('#m-layout', 'quad');
+      assert.equal(await page.inputValue('#m-layout'), 'side', 'la disposition ne change pas');
+      assert.equal(await page.evaluate('window.__x3.S.st.multi.layout'), 'side');
+      assert.equal(await page.evaluate('window.__x3.S.rec.tile'), 1);
       await page.evaluate(async () => {
         const X = window.__x3;
         for (let i = 0; i < 20; i++) { X.editView((v) => ({ ...v, yaw: v.yaw - 2 })); await new Promise((r) => setTimeout(r, 40)); }

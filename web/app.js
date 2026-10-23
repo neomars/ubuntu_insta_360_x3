@@ -570,6 +570,7 @@ for (const [k, sel] of Object.entries(VIEW_CTRL)) {
   $(sel).addEventListener('input', (e) => editView((v) => { v[k] = parseFloat(e.target.value); return v; }));
 }
 function setProjection(p) {
+  if (S.rec) { setProjectionUI(); return; }   // la projection de la vue filmée ne change pas pendant l'enregistrement
   const d = tileData();
   d.projection = p;
   d.view.fov = DEFAULT_FOV[p];
@@ -599,7 +600,10 @@ const PRESETS = {
 function applyPreset(name) {
   const p = PRESETS[name];
   if (!S.st || !p) return;
-  if (p.projection !== projection()) setProjection(p.projection);
+  if (p.projection !== projection()) {
+    if (S.rec) return;
+    setProjection(p.projection);
+  }
   const { projection: _, ...fields } = p;
   editView((v) => ({ ...v, ...fields }));
 }
@@ -615,7 +619,7 @@ function ensureTiles() {
   if (S.tile >= tileCount()) S.tile = 0;
 }
 function selectTile(i) {
-  if (!S.st || i === S.tile || i >= tileCount()) return;
+  if (!S.st || S.rec || i === S.tile || i >= tileCount()) return;   // pendant l'enregistrement, la vue filmée reste la même
   S.tile = i; S.override = null; S.selKf = -1;
   setProjectionUI(); renderKeyframes(); renderTileList(); syncViewControls(); S.dirty = true;
 }
@@ -650,6 +654,7 @@ function isUntouchedTile(v, index, count) {
   return v.projection === d.projection && !v.keyframes.length && ['yaw', 'pitch', 'roll', 'fov', 'distortion'].every((k) => (v.view[k] || 0) === d.view[k]);
 }
 function setLayout(layout) {
+  if (S.rec) { syncLayoutControls(); return; }   // la disposition ne change pas pendant l'enregistrement
   // les vues pas encore modifiées se répartissent à nouveau sur le tour selon le nombre de vues de la nouvelle disposition
   const oldCount = tileCount(), newCount = LAYOUT_TILES[layout] || 1;
   S.st.multi.views.forEach((v, j) => { if (isUntouchedTile(v, j + 1, oldCount)) S.st.multi.views[j] = defaultTileView(j + 1, newCount); });

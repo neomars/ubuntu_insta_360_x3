@@ -861,6 +861,38 @@ fn several_views_share_one_video() {
     }
 }
 
+/// Le fond des écarts entre les vues reçoit les réglages d'image une seule fois, sur chaque image : les tampons de sortie
+/// sont recyclés d'une image à l'autre, et un tampon déjà corrigé ne doit pas l'être une seconde fois.
+#[test]
+fn gaps_between_views_get_the_color_adjustment_once_on_every_frame() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    let s = fast(ExportSettings {
+        width: 640,
+        height: 360,
+        end: 1.0,
+        view: json!({"yaw": 25.0, "pitch": -10.0, "fov": 80.0}),
+        grade: Grade { brightness: 0.25, ..Default::default() },
+        multi: Multi { layout: MultiLayout::Side, gap: 8, views: vec![tile_view("flat", -100.0, 20.0, 100.0)] },
+        ..Default::default()
+    });
+    let out = dir.path().join("ecart.mp4");
+    export(&c, &Calibration::default(), &s, &out);
+    let frames = read_frames(&out, 640, 360, "rgb24", None, None);
+    assert_eq!(frames.len(), 30);
+    // le noir (0, 0, 0) après les réglages
+    let black = grade_rgb(&[0, 0, 0], (0.25, 1.0, 1.0, 1.0, 0.0, 0.0));
+    let want = [f64::from(black[0]), f64::from(black[1]), f64::from(black[2])];
+    assert!(want[0] > 55.0 && want[0] < 75.0, "fond de référence {want:?}");
+    // l'écart entre les deux vues occupe les colonnes 316 à 323
+    for (k, frame) in frames.iter().enumerate() {
+        for (x, y) in [(320, 90), (320, 270)] {
+            let px = avg_rgb(frame, 640, x, y, 1);
+            assert!(near(px, want, 6.0), "image {k}, écart en ({x}, {y}) : {px:?} au lieu de {want:?}");
+        }
+    }
+}
+
 /// Chaque vue a ses propres keyframes ; l'image de sortie suit celles de chaque rectangle.
 #[test]
 fn each_view_follows_its_own_keyframes() {
