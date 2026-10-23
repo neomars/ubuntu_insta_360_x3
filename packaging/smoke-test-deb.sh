@@ -34,6 +34,17 @@ x3studio reframe "$work/essai.insv" -o "$work/plat.mp4" --size 640x360 --stabili
 x3studio equirect "$work/essai.insv" -o "$work/360.mp4" --width 960 --crf 30 --preset ultrafast
 x3studio snapshot "$work/essai.insv" -o "$work/image.jpg" --t 1.0 --size 640x360
 for f in plat.mp4 360.mp4 image.jpg; do [ -s "$work/$f" ] || fail "$f vide ou absent"; done
+
+step "plusieurs vues, réglages d'image, perche, suivi de sujet"
+x3studio reframe "$work/essai.insv" -o "$work/duo.mp4" --layout side --size 640x360 --contrast 1.2 --saturation 1.3 \
+    --denoise 0.3 --stick mirror --crf 30 --preset ultrafast --no-audio
+[ -s "$work/duo.mp4" ] || fail "duo.mp4 vide ou absent"
+x3studio demo "$work/sujet.insv" --seconds 2 --lens 480 --motion static --subject
+x3studio track "$work/sujet.insv" --t 0.6 --yaw -3 --pitch 8 --size 14 -o "$work/suivi.json"
+grep -q '"ease": "linear"' "$work/suivi.json" || fail "le suivi n'a écrit aucun keyframe"
+x3studio reframe "$work/sujet.insv" -o "$work/suivi.mp4" --keyframes "$work/suivi.json" --fov 60 --size 640x360 --crf 30 \
+    --preset ultrafast --no-audio
+[ -s "$work/suivi.mp4" ] || fail "suivi.mp4 vide ou absent"
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$work/plat.mp4" | grep -q "640,360" || fail "taille de plat.mp4"
 grep -q "GSpherical:ProjectionType" "$work/360.mp4" || fail "métadonnées sphériques absentes de 360.mp4"
 

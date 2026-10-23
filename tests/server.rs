@@ -51,9 +51,13 @@ fn server() -> Srv {
     let app = App::new(Some(home.path().join("home")), Some(out.clone())).unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (addr, state, _handle) = rt.block_on(start_test_server(app.clone())).unwrap();
+    // Pas de connexion réutilisée : le serveur ferme parfois la connexion après une réponse donnée sans avoir lu le corps de
+    // la requête (404 avant l'extraction du JSON), et le client partagé pouvait alors envoyer la requête suivante sur une
+    // connexion déjà fermée (« Peer disconnected », au hasard du timing).
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
+        .max_idle_connections(0)
         .timeout_global(Some(Duration::from_secs(120)))
         .build()
         .into();
