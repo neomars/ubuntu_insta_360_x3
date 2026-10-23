@@ -55,8 +55,11 @@ Exporte une vidéo plate. Options : \fB\-\-projection\fR flat|fisheye|planet,
 \fB\-\-size\fR \fILxH\fR (défaut 1920x1080, valeurs paires),
 \fB\-\-yaw\fR, \fB\-\-pitch\fR, \fB\-\-roll\fR (degrés), \fB\-\-fov\fR (champ
 horizontal en degrés ; défaut selon la projection : 90, 180 ou 250),
+\fB\-\-distortion\fR \fID\fR (0 à 2 ; perspective plate seulement :
+0 = rectiligne, 1 = petite planète, entre les deux grand angle et ultra grand
+angle ; le champ \fB\-\-fov\fR peut alors dépasser 170°),
 \fB\-\-keyframes\fR \fIFICHIER.json\fR (liste d'objets
-{"t": secondes, "yaw", "pitch", "roll", "fov"} ; les champs absents gardent la
+{"t": secondes, "yaw", "pitch", "roll", "fov", "distortion"} ; les champs absents gardent la
 valeur de la vue de base).
 .TP
 .B equirect

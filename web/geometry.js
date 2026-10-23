@@ -30,11 +30,11 @@ export function wrap180(a) { return ((a + 180) % 360 + 360) % 360 - 180; }
 
 const smooth = (x) => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
 
-export const VIEW_FIELDS = ['yaw', 'pitch', 'roll', 'fov'];
+export const VIEW_FIELDS = ['yaw', 'pitch', 'roll', 'fov', 'distortion'];
 
 // Vue (yaw, pitch, roll, fov) à l'instant t : interpolation douce entre keyframes.
 export function interpolateView(keyframes, t, base) {
-  const def = Object.assign({ yaw: 0, pitch: 0, roll: 0, fov: 90 }, base || {});
+  const def = Object.assign({ yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 }, base || {});
   if (!keyframes.length) return def;
   const k = [...keyframes].sort((a, b) => a.t - b.t);
   const pick = (kf) => { const o = {}; for (const f of VIEW_FIELDS) o[f] = kf[f] ?? def[f]; return o; };
@@ -67,6 +67,17 @@ export function effectiveBlend(c) { return Math.max(0, Math.min(c.blend, c.fov -
 
 export const DEFAULT_FOV = { flat: 90, fisheye: 180, planet: 250 };
 export const FOV_RANGE = { flat: [20, 150], fisheye: [60, 300], planet: [120, 340] };
+export const MAX_DISTORTION = 2;
+
+// Demi-angle maximal (rad) de la perspective générale de distorsion d (miroir de render.rs::perspective_limit).
+export function perspectiveLimit(d) { return d >= 1 ? Math.acos(-1 / d) : Math.acos(-Math.max(0, d)); }
+
+// Champ de vision permis (degrés) : la perspective plate s'ouvre dès que la distorsion est non nulle.
+export function fovRange(projection, distortion = 0) {
+  const [lo, hi] = FOV_RANGE[projection];
+  if (projection !== 'flat' || distortion <= 1e-6) return [lo, hi];
+  return [lo, Math.max(hi, Math.min(340, 2 * perspectiveLimit(distortion) * 180 / Math.PI * 0.999))];
+}
 
 export function fmtTime(t) {
   if (!isFinite(t)) return '0:00.0';

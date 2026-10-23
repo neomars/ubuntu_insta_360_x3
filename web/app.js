@@ -1,5 +1,5 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, IDENTITY, fmtTime, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, IDENTITY, MAX_DISTORTION, fmtTime, fovRange, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
@@ -64,7 +64,8 @@ function currentView(t) {
   return interpolateView(S.st.keyframes, t, baseView());
 }
 function clampView(v) {
-  const [lo, hi] = FOV_RANGE[projection()];
+  v.distortion = projection() === 'flat' ? Math.min(MAX_DISTORTION, Math.max(0, v.distortion || 0)) : 0;
+  const [lo, hi] = fovRange(projection(), v.distortion);
   v.fov = Math.min(hi, Math.max(lo, v.fov));
   v.pitch = Math.min(90, Math.max(-90, v.pitch));
   v.yaw = wrap180(v.yaw);
@@ -86,22 +87,25 @@ function editView(patchFn) {
   syncViewControls();
 }
 
-const VIEW_CTRL = { yaw: '#v-yaw', pitch: '#v-pitch', roll: '#v-roll', fov: '#v-fov' };
+const VIEW_CTRL = { yaw: '#v-yaw', pitch: '#v-pitch', roll: '#v-roll', fov: '#v-fov', distortion: '#v-dist' };
 function syncViewControls() {
   if (!S.st) return;
-  const v = currentView(S.t);
+  const v = { distortion: 0, ...currentView(S.t) };
+  const [lo, hi] = fovRange(projection(), v.distortion);
+  const fovEl = $('#v-fov'); fovEl.min = lo; fovEl.max = hi;
   for (const k of Object.keys(VIEW_CTRL)) {
     const el = $(VIEW_CTRL[k]);
     if (document.activeElement !== el) el.value = v[k];
-    $('#o-' + k).textContent = `${v[k].toFixed(k === 'fov' ? 0 : 1)}°`;
+    $('#o-' + k).textContent = k === 'distortion' ? v[k].toFixed(2) : `${v[k].toFixed(k === 'fov' ? 0 : 1)}°`;
   }
-  $('#hud-readout').textContent = `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
+  $('#hud-readout').textContent = `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (v.distortion > 0.005 ? `  dist. ${v.distortion.toFixed(2)}` : '') + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
 }
 
 function setProjectionUI() {
-  const [lo, hi] = FOV_RANGE[projection()];
+  const [lo, hi] = fovRange(projection(), S.st ? S.st.view.distortion || 0 : 0);
   const f = $('#v-fov'); f.min = lo; f.max = hi;
   $('#proj').value = projection();
+  $('#f-dist').hidden = projection() !== 'flat';
   viewer && viewer.setProjection(projection());
 }
 
@@ -318,7 +322,7 @@ function renderKeyframes() {
     if (i === S.selKf) li.className = 'sel';
     const info = document.createElement('div');
     const t = document.createElement('span'); t.className = 't'; t.textContent = fmtTime(k.t);
-    info.append(t, ` — cap ${k.yaw.toFixed(0)}° · incl. ${k.pitch.toFixed(0)}° · champ ${k.fov.toFixed(0)}°`);
+    info.append(t, ` — cap ${k.yaw.toFixed(0)}° · incl. ${k.pitch.toFixed(0)}° · champ ${k.fov.toFixed(0)}°` + (k.distortion > 0.005 ? ` · dist. ${k.distortion.toFixed(2)}` : ''));
     const act = document.createElement('div'); act.className = 'actions';
     const bGo = btn('Aller', () => { S.selKf = i; seek(k.t); renderKeyframes(); });
     const bUp = btn('Mettre à jour', () => { const v = currentView(S.t); Object.assign(k, v, { t: k.t }); scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }, 'Remplace ce keyframe par la vue affichée');
@@ -363,7 +367,7 @@ canvas.addEventListener('pointermove', (e) => {
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   drag = { x: e.clientX, y: e.clientY };
   editView((v) => {
-    const k = v.fov / canvas.clientWidth * (projection() === 'planet' ? 0.6 : 1);
+    const k = v.fov / canvas.clientWidth * (projection() === 'planet' ? 0.6 : 1 - 0.4 * Math.min(1, v.distortion || 0));
     v.yaw -= dx * k; v.pitch += dy * k;
     return v;
   });
@@ -379,22 +383,45 @@ canvas.addEventListener('wheel', (e) => {
 canvas.addEventListener('dblclick', resetView);
 $('#btn-reset-view').addEventListener('click', resetView);
 function resetView() {
-  editView((v) => ({ ...v, yaw: 0, pitch: 0, roll: 0, fov: DEFAULT_FOV[projection()] }));
+  editView((v) => ({ ...v, yaw: 0, pitch: 0, roll: 0, fov: DEFAULT_FOV[projection()], distortion: 0 }));
 }
 for (const [k, sel] of Object.entries(VIEW_CTRL)) {
   $(sel).addEventListener('input', (e) => editView((v) => { v[k] = parseFloat(e.target.value); return v; }));
 }
-$('#proj').addEventListener('change', (e) => {
-  if (!S.st) return;
-  S.st.projection = e.target.value;
-  S.st.view.fov = DEFAULT_FOV[S.st.projection];
-  if (S.st.projection === 'planet') S.st.view.pitch = -90;
+function setProjection(p) {
+  S.st.projection = p;
+  S.st.view.fov = DEFAULT_FOV[p];
+  S.st.view.distortion = 0;
+  if (p === 'planet') S.st.view.pitch = -90;
   else if (S.st.view.pitch === -90) S.st.view.pitch = 0;
   S.override = null;
   setProjectionUI();
-  S.st.keyframes.forEach((k) => { k.fov = Math.min(FOV_RANGE[S.st.projection][1], Math.max(FOV_RANGE[S.st.projection][0], k.fov)); });
+  S.st.keyframes.forEach((k) => {
+    const [lo, hi] = fovRange(p, k.distortion || 0);
+    k.fov = Math.min(hi, Math.max(lo, k.fov));
+    if (p !== 'flat') k.distortion = 0;
+  });
   scheduleSave('projection', 'view', 'keyframes'); renderKeyframes(); S.dirty = true; updateExportSummary();
-});
+}
+$('#proj').addEventListener('change', (e) => { if (S.st) setProjection(e.target.value); });
+
+// Préréglages de perspective : champ + distorsion (+ inclinaison pour la planète) ; le fisheye est une autre projection.
+const PRESETS = {
+  lineaire: { projection: 'flat', fov: 80, distortion: 0 },
+  naturel: { projection: 'flat', fov: 100, distortion: 0.3 },
+  large: { projection: 'flat', fov: 130, distortion: 0.55 },
+  ultra: { projection: 'flat', fov: 170, distortion: 0.8 },
+  fisheye: { projection: 'fisheye', fov: 180, distortion: 0 },
+  planete: { projection: 'flat', fov: 250, distortion: 1, pitch: -90 },
+};
+function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!S.st || !p) return;
+  if (p.projection !== projection()) setProjection(p.projection);
+  const { projection: _, ...fields } = p;
+  editView((v) => ({ ...v, ...fields }));
+}
+$$('#v-presets [data-preset]').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
 
 // ---------------------------------------------------------------- panneau : onglets
 $$('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
@@ -619,7 +646,7 @@ async function fsLoad(path) {
 $('#fs-up').addEventListener('click', (e) => fsLoad(e.currentTarget.dataset.path));
 $('#fs-go').addEventListener('click', () => {
   const v = $('#fs-path').value.trim();
-  if (/\.(insv|mp4|mov|mkv|webm|m4v)$/i.test(v)) openProject(v); else fsLoad(v);
+  if (/\.(insv|lrv|mp4|mov|mkv|webm|m4v)$/i.test(v)) openProject(v); else fsLoad(v);
 });
 $('#fs-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#fs-go').click(); } });
 $('#btn-help').addEventListener('click', () => $('#dlg-help').showModal());

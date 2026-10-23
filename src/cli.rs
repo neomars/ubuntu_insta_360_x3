@@ -148,6 +148,9 @@ struct ViewArgs {
     /// Champ horizontal (°) ; défaut selon la projection
     #[arg(long, default_value_t = 0.0)]
     fov: f64,
+    /// Distorsion de la perspective plate, de 0 (rectiligne) à 2 ; 1 = petite planète
+    #[arg(long, default_value_t = 0.0)]
+    distortion: f64,
 }
 
 #[derive(Args, Debug)]
@@ -298,14 +301,26 @@ fn settings(args: &ExportArgs) -> ExportSettings {
 }
 
 fn view_settings(base: ExportSettings, v: &ViewArgs) -> Result<ExportSettings> {
-    check_finite(&[("--yaw", v.yaw), ("--pitch", v.pitch), ("--roll", v.roll), ("--fov", v.fov)])?;
+    check_finite(&[
+        ("--yaw", v.yaw),
+        ("--pitch", v.pitch),
+        ("--roll", v.roll),
+        ("--fov", v.fov),
+        ("--distortion", v.distortion),
+    ])?;
+    if !(0.0..=pipeline::MAX_DISTORTION).contains(&v.distortion) {
+        return Err(export_err(format!("La distorsion doit être comprise entre 0 et {}.", pipeline::MAX_DISTORTION)));
+    }
+    if v.distortion != 0.0 && v.projection != "flat" {
+        return Err(export_err("La distorsion ne s'applique qu'à la projection plate (--projection flat)."));
+    }
     let fov = if v.fov != 0.0 { v.fov } else { default_fov(&v.projection) };
     Ok(ExportSettings {
         mode: "reframe".into(),
         projection: v.projection.clone(),
         width: v.size.0,
         height: v.size.1,
-        view: json!({ "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": fov }),
+        view: json!({ "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": fov, "distortion": v.distortion }),
         ..base
     })
 }
@@ -588,6 +603,30 @@ mod tests {
         };
         assert_eq!(b.t, 2.5);
         assert_eq!(view_settings(settings(&b.export), &b.view).unwrap().view["fov"].as_f64(), Some(180.0));
+        // distorsion : transmise à la vue, bornée, réservée à la projection plate
+        let Cmd::Reframe(r) =
+            parse(&["x3studio", "reframe", "v.insv", "--distortion", "0.5", "--fov", "130"]).unwrap().cmd
+        else {
+            panic!()
+        };
+        let s = view_settings(settings(&r.export), &r.view).unwrap();
+        assert_eq!((s.view["distortion"].as_f64(), s.view["fov"].as_f64()), (Some(0.5), Some(130.0)));
+        for (args, needle) in [
+            (&["x3studio", "reframe", "v.insv", "--distortion", "3"][..], "entre 0 et 2"),
+            (&["x3studio", "reframe", "v.insv", "--distortion", "nan"][..], "--distortion"),
+            (
+                &["x3studio", "reframe", "v.insv", "--distortion", "1", "--projection", "fisheye"][..],
+                "projection plate",
+            ),
+        ] {
+            let Cmd::Reframe(r) = parse(args).unwrap().cmd else { panic!() };
+            let e = view_settings(settings(&r.export), &r.view).unwrap_err();
+            assert!(e.to_string().contains(needle), "{args:?} : {e}");
+        }
+        assert!(
+            parse(&["x3studio", "reframe", "v.insv", "--distortion", "-1"]).is_err(),
+            "valeur négative : option invalide"
+        );
         let d = settings(&b.export);
         assert_eq!(
             (d.start, d.end, d.speed, d.fps, d.codec.as_str(), d.preset.as_str(), d.audio),

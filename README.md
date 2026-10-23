@@ -28,7 +28,7 @@ l'interface n'écoute que sur `127.0.0.1`.
 | Import des `.insv` (deux objectifs) | Détection automatique : deux flux dans un fichier (X3, X2, ONE R), deux fichiers `_00_`/`_10_` (ONE X), deux fisheye côte à côte dans un flux 2:1 (le `.lrv` basse résolution de l'X3, reconnu à son nom, à sa signature ou, pour une copie sans marque, à ses images), ou vidéo 360° déjà assemblée |
 | Assemblage 360° | Fisheye → équirectangulaire avec fondu de la couture ; calibration par objectif ajustable en direct |
 | Recadrage (« Reframe ») | Caméra virtuelle : cap, inclinaison, roulis, champ de vision, **keyframes** avec interpolation douce, déplaçables sur la timeline |
-| Perspectives | Plat (rectiligne), fisheye, **petite planète** |
+| Perspectives | Plat (rectiligne), fisheye, **petite planète**, et pour le plat une **distorsion** réglable et animable par keyframes (du rectiligne à la boule de cristal) avec des **préréglages** : Linéaire, Naturel, Large, Ultra large, Fisheye, Planète |
 | FlowState / horizon | Stabilisation par analyse d'image : **lissage**, **horizon à plat** (cap lissé), **verrouillage** de la direction ; correction manuelle de l'horizon |
 | Montage | Début/fin d'export, vitesse ×0,25 à ×8, cadence, son conservé |
 | Export | Vidéo plate 16:9, 9:16, 4:5, 1:1, 720p/1080p/4K ; **vidéo 360° 5,7K/4K/3K** avec balises « vidéo sphérique » (YouTube, VLC…) ; H.264 ou H.265 ; capture d'image JPEG ou PNG |

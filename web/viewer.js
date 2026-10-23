@@ -13,15 +13,28 @@ precision highp float;
 varying vec2 vP;
 uniform sampler2D uTex;
 uniform mat3 uM, uRA, uRB;
-uniform float uFov, uAspect, uLensHalf, uBlend, uSwap, uSeam;
+uniform float uFov, uAspect, uLensHalf, uBlend, uSwap, uSeam, uDist;
 uniform int uProj, uKind;
 const float PI = 3.14159265359;
 
 vec3 outRay() {
   vec2 u = vP;
   if (uProj == 0) {
-    float t = tan(uFov * 0.5);
-    return normalize(vec3(u.x * t, u.y * t * uAspect, 1.0));
+    if (uDist < 1e-6) {
+      float t = tan(uFov * 0.5);
+      return normalize(vec3(u.x * t, u.y * t * uAspect, 1.0));
+    }
+    // perspective générale : r = (d+1) sin θ / (d + cos θ), inverse en forme close (miroir de render.rs::general_ray)
+    float d = uDist;
+    float lim = d >= 1.0 ? acos(-1.0 / d) : acos(-d);
+    float hf = min(uFov * 0.5, lim * 0.999);
+    float ge = (d + 1.0) * sin(hf) / (d + cos(hf));
+    vec2 p = vec2(u.x, u.y * uAspect) * ge;
+    float r = length(p);
+    float rr = sqrt((d + 1.0) * (d + 1.0) + r * r);
+    float th = atan(r, d + 1.0) + asin(clamp(r * d / rr, -1.0, 1.0));
+    float s = r > 1e-6 ? sin(th) / r : 1.0;
+    return vec3(p * s, cos(th));
   }
   if (uProj == 1) {
     vec2 a = vec2(u.x, u.y * uAspect) * uFov * 0.5;
@@ -97,7 +110,7 @@ export class Viewer {
     gl.useProgram(prog);
     this.prog = prog;
     this.u = {};
-    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uProj', 'uKind'])
+    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uDist', 'uProj', 'uKind'])
       this.u[n] = gl.getUniformLocation(prog, n);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -114,7 +127,7 @@ export class Viewer {
     this.kind = 'dual';
     this.calib = { fov: 200, blend: 10, swap_lenses: false, a_yaw: 0, a_pitch: 0, a_roll: 0, b_yaw: 0, b_pitch: 0, b_roll: 0 };
     this.projection = 'flat';
-    this.view = { yaw: 0, pitch: 0, roll: 0, fov: 90 };
+    this.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
     this.stab = IDENTITY;       // matrice courante (sortie -> sphère de la caméra)
     this.seam = false;
     this.hasFrame = false;
@@ -162,6 +175,7 @@ export class Viewer {
     gl.uniform1f(u.uBlend, effectiveBlend(c));
     gl.uniform1f(u.uSwap, c.swap_lenses ? 1 : 0);
     gl.uniform1f(u.uSeam, this.seam ? 1 : 0);
+    gl.uniform1f(u.uDist, this.projection === 'flat' ? Math.min(2, Math.max(0, this.view.distortion || 0)) : 0);
     gl.uniform1i(u.uProj, PROJ[this.projection] ?? 0);
     gl.uniform1i(u.uKind, this.kind === 'equirect' ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

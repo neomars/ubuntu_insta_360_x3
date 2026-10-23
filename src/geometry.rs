@@ -103,7 +103,8 @@ impl Ypr {
     }
 }
 
-/// Vue de la caméra virtuelle : `fov` = champ de vision horizontal en degrés.
+/// Vue de la caméra virtuelle : `fov` = champ de vision horizontal en degrés, `distortion` = forme de la
+/// perspective (0 = rectiligne, 1 = stéréographique « petite planète » ; projection plate seulement).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct View {
@@ -111,11 +112,12 @@ pub struct View {
     pub pitch: f64,
     pub roll: f64,
     pub fov: f64,
+    pub distortion: f64,
 }
 
 impl Default for View {
     fn default() -> Self {
-        View { yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 90.0 }
+        View { yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 90.0, distortion: 0.0 }
     }
 }
 
@@ -126,7 +128,7 @@ impl View {
 }
 
 /// Keyframe : instant `t` (secondes, temps source) ; un champ absent reprend la valeur de la vue de base.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Keyframe {
     pub t: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,11 +139,20 @@ pub struct Keyframe {
     pub roll: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fov: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distortion: Option<f64>,
 }
 
 impl Keyframe {
     pub fn full(t: f64, v: &View) -> Self {
-        Keyframe { t, yaw: Some(v.yaw), pitch: Some(v.pitch), roll: Some(v.roll), fov: Some(v.fov) }
+        Keyframe {
+            t,
+            yaw: Some(v.yaw),
+            pitch: Some(v.pitch),
+            roll: Some(v.roll),
+            fov: Some(v.fov),
+            distortion: Some(v.distortion),
+        }
     }
     fn view(&self, base: &View) -> View {
         View {
@@ -149,6 +160,7 @@ impl Keyframe {
             pitch: self.pitch.unwrap_or(base.pitch),
             roll: self.roll.unwrap_or(base.roll),
             fov: self.fov.unwrap_or(base.fov),
+            distortion: self.distortion.unwrap_or(base.distortion),
         }
     }
 }
@@ -184,6 +196,7 @@ pub fn interpolate_view(keyframes: &[Keyframe], t: f64, base: &View) -> View {
                 pitch: va.pitch + (vb.pitch - va.pitch) * u,
                 roll: va.roll + (vb.roll - va.roll) * u,
                 fov: va.fov + (vb.fov - va.fov) * u,
+                distortion: va.distortion + (vb.distortion - va.distortion) * u,
             };
         }
     }
@@ -247,8 +260,8 @@ mod tests {
     #[test]
     fn interpolation() {
         let kfs = [
-            Keyframe::full(1.0, &View { yaw: 170.0, pitch: 0.0, roll: 0.0, fov: 90.0 }),
-            Keyframe::full(3.0, &View { yaw: -170.0, pitch: 20.0, roll: 0.0, fov: 50.0 }),
+            Keyframe::full(1.0, &View { yaw: 170.0, fov: 90.0, ..View::default() }),
+            Keyframe::full(3.0, &View { yaw: -170.0, pitch: 20.0, fov: 50.0, distortion: 1.0, ..View::default() }),
         ];
         let base = View::default();
         assert_eq!(interpolate_view(&kfs, 0.0, &base).yaw, 170.0);
@@ -256,10 +269,11 @@ mod tests {
         let mid = interpolate_view(&kfs, 2.0, &base);
         assert!((mid.yaw.abs() - 180.0).abs() < 1e-9, "chemin le plus court via 180° : {}", mid.yaw);
         assert!((mid.pitch - 10.0).abs() < 1e-9 && (mid.fov - 70.0).abs() < 1e-9);
+        assert!((mid.distortion - 0.5).abs() < 1e-9, "la distorsion s'interpole comme le champ : {}", mid.distortion);
         let only_fov = View { fov: 77.0, ..View::default() };
         assert_eq!(interpolate_view(&[], 5.0, &only_fov).fov, 77.0);
         // champ absent d'un keyframe : valeur de la vue de base
-        let partial = [Keyframe { t: 0.0, yaw: Some(40.0), pitch: None, roll: None, fov: None }];
+        let partial = [Keyframe { t: 0.0, yaw: Some(40.0), ..Default::default() }];
         let v = interpolate_view(&partial, 1.0, &View { pitch: 7.0, ..View::default() });
         assert_eq!((v.yaw, v.pitch), (40.0, 7.0));
     }

@@ -33,7 +33,11 @@ Repère main droite : **x vers la droite, y vers le haut, z vers l'avant**. Angl
 * Objectifs : fisheye **équidistants**, `r = θ / (fov/2)` (le bord de l'image carrée correspond à `fov/2`) ;
   l'objectif A (flux 0) regarde vers l'avant, l'objectif B vers l'arrière (`Ry(π)`) ; `fov` par défaut 200°.
 * Projections de sortie, `u, v ∈ [-1, 1]` (`v` vers le bas), `aspect = h / w`, `fov` horizontal :
-  * `flat` : `a ∝ (u·t, −v·t·aspect, 1)`, `t = tan(fov/2)` ;
+  * `flat` : `a ∝ (u·t, −v·t·aspect, 1)`, `t = tan(fov/2)` ; avec une **distorsion** `d > 0` (keyframable), perspective
+    générale : un rayon d'angle `θ` à l'axe arrive à `r = (d+1)·sin θ / (d + cos θ)`, normalisé pour que le bord
+    horizontal (`|u| = 1`) reste à `fov/2` ; inverse en forme close `θ = atan2(r, d+1) + asin(r·d / √((d+1)² + r²))`.
+    `d = 0` : rectiligne ; `d = 1` : stéréographique (la petite planète) ; `d → ∞` : orthographique. La formule
+    n'existe que jusqu'à `θ_max = acos(−d)` (`d < 1`) ou `acos(−1/d)` (`d > 1`), qui borne le champ (`2·θ_max`) ;
   * `fisheye` : `θ = |(u, v·aspect)| · fov/2` ;
   * `planet` (stéréographique) : `θ = 2·atan(|(u·tan(fov/4), v·tan(fov·aspect/4))|)` ;
   * `equirect` : `lon = u·π`, `lat = −v·π/2`.

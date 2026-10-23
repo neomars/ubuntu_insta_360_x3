@@ -70,6 +70,15 @@
       <div class="field"><label for="v-pitch">Inclinaison</label><input id="v-pitch" type="range" min="-90" max="90" step="0.5"><output id="o-pitch"></output></div>
       <div class="field"><label for="v-roll">Roulis</label><input id="v-roll" type="range" min="-180" max="180" step="0.5"><output id="o-roll"></output></div>
       <div class="field"><label for="v-fov">Champ de vision</label><input id="v-fov" type="range" min="20" max="150" step="1"><output id="o-fov"></output></div>
+      <div class="field" id="f-dist"><label for="v-dist">Distorsion <small>0 = rectiligne · 1 = petite planète</small></label><input id="v-dist" type="range" min="0" max="2" step="0.01"><output id="o-distortion"></output></div>
+      <div class="presets" id="v-presets" role="group" aria-label="Préréglages de perspective">
+        <button type="button" class="btn small ghost" data-preset="lineaire" title="Perspective rectiligne : les lignes droites restent droites">Linéaire</button>
+        <button type="button" class="btn small ghost" data-preset="naturel" title="Rendu proche de l'œil, bords légèrement comprimés">Naturel</button>
+        <button type="button" class="btn small ghost" data-preset="large" title="Grand angle">Grand angle</button>
+        <button type="button" class="btn small ghost" data-preset="ultra" title="Ultra grand angle">Ultra grand angle</button>
+        <button type="button" class="btn small ghost" data-preset="fisheye" title="Fisheye équidistant">Fisheye</button>
+        <button type="button" class="btn small ghost" data-preset="planete" title="Petite planète (animable entre keyframes)">Petite planète</button>
+      </div>
       <p class="hint">Sans keyframe, la vue est la même pour toute la vidéo. Placez-vous sur un instant, orientez la vue puis ajoutez un keyframe : la caméra virtuelle se déplace en douceur d'un keyframe au suivant.</p>
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>

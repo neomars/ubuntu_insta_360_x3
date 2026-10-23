@@ -82,6 +82,63 @@ fn views_match_the_scene_for_each_projection() {
     }
 }
 
+/// Distorsion : vues fixes, puis fondu enchaîné rectiligne → petite planète par keyframes (champ et distorsion
+/// interpolés ensemble) ; comparées à la scène par une formule écrite indépendamment du moteur.
+#[test]
+fn distortion_shapes_the_view_and_animates_between_keyframes() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    for (view, dist) in
+        [((25.0, -10.0, 4.0, 110.0), 0.5), ((-100.0, 30.0, 0.0, 150.0), 0.8), ((0.0, -90.0, 0.0, 250.0), 1.0)]
+    {
+        let out = dir.path().join(format!("d{dist}.mp4"));
+        let s = ExportSettings {
+            view: json!({"yaw": view.0, "pitch": view.1, "roll": view.2, "fov": view.3, "distortion": dist}),
+            ..flat_settings(view)
+        };
+        export(&c, &Calibration::default(), &s, &out);
+        let frames = read_frames(&out, 640, 360, "rgb24", None, Some(8));
+        let got = &frames[frames.len() / 2];
+        let want = expected_view_d(TEX(), "flat", 640, 360, &Mat3::identity(), view, dist);
+        let good = mean_abs_diff(&downscale_rgb(got, 640, 360, 4).0, &downscale_rgb(&want, 640, 360, 4).0);
+        // la même vue sans distorsion est nettement différente : le test discrimine
+        let plain = expected_view_d(
+            TEX(),
+            "flat",
+            640,
+            360,
+            &Mat3::identity(),
+            (view.0, view.1, view.2, view.3.min(165.0)),
+            0.0,
+        );
+        let bad = mean_abs_diff(&downscale_rgb(got, 640, 360, 4).0, &downscale_rgb(&plain, 640, 360, 4).0);
+        assert!(good < 9.0, "distorsion {dist}, vue {view:?} : écart {good:.2}");
+        assert!(bad > 3.0 * good, "distorsion {dist} : écart {good:.2} contre {bad:.2} sans distorsion");
+    }
+    // animation : à mi-parcours (smoothstep = 0,5) champ 145° et distorsion 0,5
+    let out = dir.path().join("morph.mp4");
+    let s = ExportSettings {
+        keyframes: vec![
+            x3studio::geometry::Keyframe { t: 0.0, fov: Some(90.0), distortion: Some(0.0), ..Default::default() },
+            x3studio::geometry::Keyframe { t: 1.0, fov: Some(200.0), distortion: Some(1.0), ..Default::default() },
+        ],
+        ..flat_settings((0.0, 0.0, 0.0, 90.0))
+    };
+    export(&c, &Calibration::default(), &s, &out);
+    let frames = read_frames(&out, 640, 360, "rgb24", None, Some(30));
+    let mid = &frames[15];
+    for (frame, view, dist, label) in
+        [(&frames[0], (0.0, 0.0, 0.0, 90.0), 0.0, "début"), (mid, (0.0, 0.0, 0.0, 145.0), 0.5, "milieu")]
+    {
+        let want = expected_view_d(TEX(), "flat", 640, 360, &Mat3::identity(), view, dist);
+        let err = mean_abs_diff(&downscale_rgb(frame, 640, 360, 4).0, &downscale_rgb(&want, 640, 360, 4).0);
+        assert!(err < 9.0, "{label} : écart {err:.2}");
+    }
+    let straight = expected_view_d(TEX(), "flat", 640, 360, &Mat3::identity(), (0.0, 0.0, 0.0, 145.0), 0.0);
+    let off = mean_abs_diff(&downscale_rgb(mid, 640, 360, 4).0, &downscale_rgb(&straight, 640, 360, 4).0);
+    assert!(off > 12.0, "à mi-parcours l'image n'est pas rectiligne (écart {off:.2})");
+}
+
 #[test]
 fn the_user_orientation_recentres_the_view() {
     // orientation « cap 90° » : le centre de la sortie regarde la direction O⁻¹ · z = -x (la bande jaune)
@@ -146,8 +203,8 @@ fn keyframes_move_the_view_over_time() {
         end: 1.2,
         view: json!({"fov": 60}),
         keyframes: vec![
-            x3studio::geometry::Keyframe { t: 0.0, yaw: Some(0.0), pitch: Some(30.0), roll: None, fov: None },
-            x3studio::geometry::Keyframe { t: 1.0, yaw: Some(90.0), pitch: Some(30.0), roll: None, fov: None },
+            x3studio::geometry::Keyframe { t: 0.0, yaw: Some(0.0), pitch: Some(30.0), ..Default::default() },
+            x3studio::geometry::Keyframe { t: 1.0, yaw: Some(90.0), pitch: Some(30.0), ..Default::default() },
         ],
         ..Default::default()
     });

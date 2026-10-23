@@ -62,6 +62,9 @@ describe('interface X3 Studio Local', () => {
         ['flat', { yaw: -120, pitch: -20, roll: 0, fov: 110 }, 'off', 0.4, {}],
         ['fisheye', { yaw: 10, pitch: 0, roll: 0, fov: 200 }, 'smooth', 0.5, {}],
         ['planet', { yaw: 0, pitch: -90, roll: 0, fov: 250 }, 'off', 1.5, {}],
+        // perspective à distorsion : grand angle, puis petite planète « animable » (distorsion 1)
+        ['flat', { yaw: 20, pitch: 5, roll: 0, fov: 130, distortion: 0.55 }, 'off', 0.6, {}],
+        ['flat', { yaw: 0, pitch: -90, roll: 0, fov: 250, distortion: 1 }, 'off', 0.6, {}],
         // calibration des objectifs non triviale (rotations fines, quart de tour, champ, fondu), vue sur la couture
         ['flat', { yaw: 90, pitch: 5, roll: 0, fov: 100 }, 'off', 0.8, { a_yaw: 3, a_pitch: -2, a_roll: 4, b_yaw: -5, b_pitch: 3, b_roll: 90, fov: 195, blend: 15 }],
         ['fisheye', { yaw: 180, pitch: 0, roll: 0, fov: 200 }, 'off', 0.8, { swap_lenses: true, b_roll: -20 }],
@@ -69,7 +72,8 @@ describe('interface X3 Studio Local', () => {
       for (const [proj, view, stab, t, calib] of cases) {
         await page.evaluate(async ([proj, view, stab, t, calib]) => {
           const X = window.__x3, S = X.S;
-          S.st.projection = proj; S.st.view = view; S.st.keyframes = []; S.st.stabilization.mode = stab; S.override = null;
+          // la distorsion est toujours explicite : le serveur fusionne les réglages, un champ absent garderait l'ancienne valeur
+          S.st.projection = proj; S.st.view = { distortion: 0, ...view }; S.st.keyframes = []; S.st.stabilization.mode = stab; S.override = null;
           S.st.calibration = { ...S.st.calibration, ...calib };
           X.viewer.setCalibration(S.st.calibration);
           X.viewer.setProjection(proj);
@@ -341,6 +345,56 @@ describe('interface X3 Studio Local', () => {
         assert.ok(Math.abs(t - k / fps) < 1e-6, `image ${k} : l'instant courant est celui de l'image (${t} au lieu de ${k / fps})`);
         const { diff } = await previewVsExport(page);
         assert.ok(diff < 0.03, `image ${k} : l'aperçu montre une autre image que l'export (écart ${diff.toFixed(4)})`);
+      }
+    });
+  });
+
+  it("distorsion et préréglages de perspective : curseur, préréglages, animation entre keyframes", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('distorsion'));
+      const state = () => page.evaluate(() => ({ ...window.__x3.S.st.view, projection: window.__x3.S.st.projection }));
+      const near = (a, b, eps, label) => assert.ok(Math.abs(a - b) <= eps, `${label} : ${a} au lieu de ${b}`);
+      // le curseur n'existe que pour la projection plate
+      assert.ok(await page.isVisible('#f-dist'));
+      await page.fill('#v-dist', '0.7');
+      await page.dispatchEvent('#v-dist', 'input');
+      near((await state()).distortion, 0.7, 1e-9, 'curseur de distorsion');
+      // préréglages
+      for (const [name, projection, fov, distortion, pitch] of [
+        ['large', 'flat', 130, 0.55, 0], ['ultra', 'flat', 170, 0.8, 0], ['planete', 'flat', 250, 1, -90],
+        ['fisheye', 'fisheye', 180, 0, 0], ['lineaire', 'flat', 80, 0, 0],
+      ]) {
+        await page.click(`[data-preset=${name}]`);
+        const v = await state();
+        assert.equal(v.projection, projection, name);
+        near(v.fov, fov, 0.5, `${name} : champ`); near(v.distortion, distortion, 1e-9, `${name} : distorsion`);
+        near(v.pitch, pitch, 0.5, `${name} : inclinaison`);
+        assert.equal(await page.isVisible('#f-dist'), projection === 'flat', `${name} : curseur de distorsion visible seulement en projection plate`);
+        await settle(page);
+        await sleep(300);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${name} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      }
+      // animation : du rectiligne (champ 90°) à la petite planète (champ 200°, distorsion 1) en une seconde
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
+        S.st.keyframes = [
+          { t: 0, yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 },
+          { t: 1, yaw: 0, pitch: 0, roll: 0, fov: 200, distortion: 1 },
+        ];
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes']) S.pending.add(k);
+        await X.flushSave();
+      });
+      for (const [t, fov, distortion] of [[0, 90, 0], [0.5, 145, 0.5], [1, 200, 1]]) {
+        await page.evaluate((t) => { const X = window.__x3; X.seek(t); X.S.dirty = true; }, t);
+        await settle(page);
+        await sleep(300);
+        const v = await page.evaluate('window.__x3.viewer.view');
+        near(v.fov, fov, 1.5, `t=${t} : champ`); near(v.distortion, distortion, 0.03, `t=${t} : distorsion`);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `t=${t} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
       }
     });
   });

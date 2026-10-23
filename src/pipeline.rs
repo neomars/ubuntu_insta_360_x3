@@ -9,7 +9,8 @@ use crate::calibration::Calibration;
 use crate::error::{export_err, media_err, Cancelled, Result};
 use crate::geometry::{interpolate_view, Keyframe, Mat3, View, Ypr};
 use crate::media::{Layout, Source};
-use crate::render::{LensRenderer, Projection, SourceKind};
+pub use crate::render::MAX_DISTORTION;
+use crate::render::{perspective_limit, LensRenderer, Projection, SourceKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -110,6 +111,17 @@ fn max_fov(projection: &str) -> f64 {
     }
 }
 
+/// Champ maximal d'une projection pour une distorsion donnée : la perspective plate s'ouvre jusqu'à
+/// `2 · acos(-d)` (350° au plus) dès que la distorsion est non nulle ; sans distorsion, 170° comme avant.
+pub fn max_fov_for(projection: &str, distortion: f64) -> f64 {
+    if projection == "flat" && distortion > 1e-6 {
+        (2.0 * perspective_limit(distortion.min(MAX_DISTORTION)).to_degrees() * 0.999)
+            .clamp(MAX_FOV_FLAT, MAX_FOV_PLANET)
+    } else {
+        max_fov(projection)
+    }
+}
+
 impl ExportSettings {
     /// Vérifie les paramètres (erreurs `ExportError` : valeurs inconnues, tailles impaires ou démesurées…).
     pub fn validate(&self) -> Result<()> {
@@ -166,9 +178,10 @@ pub struct Plan {
     /// FFmpeg encodeur : stdin = images I420 brutes de la taille de sortie.
     pub encoder: Vec<String>,
     pub renderer: LensRenderer,
-    /// Une matrice de vue et un champ de vision par image à rendre.
+    /// Une matrice de vue, un champ de vision et une distorsion par image à rendre.
     pub mats: Vec<Mat3>,
     pub fovs: Vec<f64>,
+    pub dists: Vec<f64>,
     /// Injecter les métadonnées sphériques après l'encodage.
     pub spherical: bool,
 }
@@ -214,6 +227,7 @@ pub fn base_view(s: &ExportSettings) -> View {
         pitch: get("pitch", 0.0),
         roll: get("roll", 0.0),
         fov: get("fov", default_fov(projection_of(s))),
+        distortion: get("distortion", 0.0).clamp(0.0, MAX_DISTORTION),
     }
 }
 
@@ -226,12 +240,24 @@ pub fn view_params(
     times_abs: &[f64],
     stab: Option<&[Mat3]>,
 ) -> (Vec<Mat3>, Vec<f64>) {
+    let (mats, fovs, _) = view_params_ex(src, s, times_abs, stab);
+    (mats, fovs)
+}
+
+/// Comme [`view_params`], avec la distorsion de chaque image (0 hors projection plate).
+pub fn view_params_ex(
+    src: &Source,
+    s: &ExportSettings,
+    times_abs: &[f64],
+    stab: Option<&[Mat3]>,
+) -> (Vec<Mat3>, Vec<f64>, Vec<f64>) {
     let o_inv = s.orientation.matrix().transpose();
     let proj = projection_of(s);
     let base = base_view(s);
     let stab = stab.filter(|m| !m.is_empty());
     let mut mats = Vec::with_capacity(times_abs.len());
     let mut fovs = Vec::with_capacity(times_abs.len());
+    let mut dists = Vec::with_capacity(times_abs.len());
     for &t in times_abs {
         let stabilized = match stab {
             Some(m) => m[((t * src.fps).round_ties_even().max(0.0) as usize).min(m.len() - 1)],
@@ -239,14 +265,17 @@ pub fn view_params(
         };
         if s.mode == "reframe" {
             let v = interpolate_view(&s.keyframes, t, &base);
+            let dist = if proj == "flat" { v.distortion.clamp(0.0, MAX_DISTORTION) } else { 0.0 };
             mats.push(stabilized * v.matrix());
-            fovs.push(v.fov.clamp(5.0, max_fov(proj)));
+            fovs.push(v.fov.clamp(5.0, max_fov_for(proj, dist)));
+            dists.push(dist);
         } else {
             mats.push(stabilized);
             fovs.push(0.0);
+            dists.push(0.0);
         }
     }
-    (mats, fovs)
+    (mats, fovs, dists)
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +448,7 @@ pub fn build_plan(
     let speed = s.speed.clamp(0.05, 100.0);
     let n_proc = ((dur * pfps).round_ties_even() as usize).max(1);
     let times: Vec<f64> = (0..n_proc).map(|i| start + i as f64 / pfps).collect();
-    let (mats, fovs) = view_params(src, s, &times, stab);
+    let (mats, fovs, dists) = view_params_ex(src, s, &times, stab);
     let out_dur = dur / speed;
     let spherical = s.mode == "equirect" && s.spherical_metadata;
     let renderer = make_renderer(src, calib, s)?;
@@ -485,6 +514,7 @@ pub fn build_plan(
         renderer,
         mats,
         fovs,
+        dists,
         spherical,
     })
 }
@@ -505,7 +535,7 @@ pub fn build_snapshot_plan(
     let t = t.clamp(0.0, (src.duration - 1.0 / src.fps.max(1.0)).max(0.0));
     let end = src.duration.min(t + 1.0);
     let s2 = ExportSettings { start: t, end, speed: 1.0, ..s.clone() };
-    let (mats, fovs) = view_params(src, &s2, &[t], stab);
+    let (mats, fovs, dists) = view_params_ex(src, &s2, &[t], stab);
     let renderer = make_renderer(src, calib, &s2)?;
     let (ow, oh) = output_size(src, &s2);
 
@@ -543,6 +573,7 @@ pub fn build_snapshot_plan(
         renderer,
         mats,
         fovs,
+        dists,
         spherical: false,
     })
 }
@@ -849,7 +880,7 @@ fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &Atomi
                 }
             };
             let mut out = out_free_rx.try_recv().unwrap_or_else(|_| vec![0u8; n_out]);
-            plan.renderer.render(&frame, &plan.mats[done], plan.fovs[done], &mut out);
+            plan.renderer.render_with(&frame, &plan.mats[done], plan.fovs[done], plan.dists[done], &mut out);
             let _ = free_tx.send(frame);
             if out_tx.send(out).is_err() {
                 break; // le thread d'écriture s'est arrêté : l'encodeur est mort
@@ -965,8 +996,8 @@ mod tests {
         let src = x3(10.0, 30.0);
         let s = ExportSettings {
             keyframes: vec![
-                Keyframe { t: 1.0, yaw: Some(0.0), pitch: None, roll: None, fov: Some(60.0) },
-                Keyframe { t: 3.0, yaw: Some(40.0), pitch: None, roll: None, fov: Some(400.0) },
+                Keyframe { t: 1.0, yaw: Some(0.0), fov: Some(60.0), ..Default::default() },
+                Keyframe { t: 3.0, yaw: Some(40.0), fov: Some(400.0), ..Default::default() },
             ],
             orientation: Ypr { yaw: 10.0, pitch: 0.0, roll: 0.0 },
             ..Default::default()
@@ -984,6 +1015,31 @@ mod tests {
         let (m, _) = view_params(&src, &plain, &[0.5 / 30.0, 1.5 / 30.0, 2.0, 99.0], Some(&stab));
         assert!(close(&m[0], &stab[0]) && close(&m[1], &stab[2]), "0,5 → 0 et 1,5 → 2 (arrondi au pair)");
         assert!(close(&m[2], &stab[60]) && close(&m[3], &stab[399]), "borné à la dernière matrice");
+        // la distorsion suit les keyframes et ouvre le champ maximal de la projection plate
+        let morph = ExportSettings {
+            keyframes: vec![
+                Keyframe { t: 0.0, fov: Some(90.0), distortion: Some(0.0), ..Default::default() },
+                Keyframe { t: 2.0, fov: Some(250.0), distortion: Some(1.0), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let (_, f, d) = view_params_ex(&src, &morph, &[0.0, 1.0, 2.0, 5.0], None);
+        assert_eq!(d, vec![0.0, 0.5, 1.0, 1.0]);
+        assert_eq!((f[0], f[2], f[3]), (90.0, 250.0, 250.0), "250° n'est permis qu'avec de la distorsion");
+        assert!((f[1] - 170.0).abs() < 1e-9, "mi-parcours : champ {}", f[1]);
+        let flat_only = ExportSettings { view: json!({"fov": 250}), ..Default::default() };
+        assert_eq!(view_params_ex(&src, &flat_only, &[0.0], None).1[0], 170.0, "sans distorsion : 170° au plus");
+        // fisheye et petite planète ignorent la distorsion
+        let fish =
+            ExportSettings { projection: "fisheye".into(), view: json!({"distortion": 1}), ..Default::default() };
+        assert_eq!(view_params_ex(&src, &fish, &[0.0], None).2[0], 0.0);
+        assert_eq!(base_view(&ExportSettings { view: json!({"distortion": 9}), ..Default::default() }).distortion, 2.0);
+        assert_eq!(
+            base_view(&ExportSettings { view: json!({"distortion": -1}), ..Default::default() }).distortion,
+            0.0
+        );
+        assert!((max_fov_for("flat", 2.0) - 239.76).abs() < 0.01 && max_fov_for("flat", 1.0) == 350.0);
+        assert_eq!((max_fov_for("flat", 0.0), max_fov_for("fisheye", 1.0)), (170.0, 360.0));
         // mode équirectangulaire : pas de vue, seulement la stabilisation
         let eq = ExportSettings { mode: "equirect".into(), ..Default::default() };
         let (m, f) = view_params(&src, &eq, &[1.0], Some(&stab));
@@ -1191,10 +1247,7 @@ mod tests {
         assert!(arg_after(&png.encoder, "-q:v").is_none());
         assert!(build_snapshot_plan(&src, &calib, &s, f64::NAN, Path::new("c.png"), None).is_err());
         // l'instant sert aussi à choisir les keyframes et la stabilisation
-        let kf = ExportSettings {
-            keyframes: vec![Keyframe { t: 5.0, yaw: Some(33.0), pitch: None, roll: None, fov: None }],
-            ..s
-        };
+        let kf = ExportSettings { keyframes: vec![Keyframe { t: 5.0, yaw: Some(33.0), ..Default::default() }], ..s };
         let p = build_snapshot_plan(&src, &calib, &kf, 2.0, Path::new("c.jpg"), None).unwrap();
         assert!(close(&p.mats[0], &crate::geometry::ypr_to_matrix(33.0, 0.0, 0.0)));
     }

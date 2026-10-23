@@ -391,10 +391,24 @@ mod tests {
         serde_json::from_str(include_str!("../tests/golden/project.json")).unwrap()
     }
 
+    /// Chaque clé de `golden` se retrouve, égale, dans `actual` (qui peut en avoir de plus : réglages ajoutés
+    /// après le portage de la version Python, absents des valeurs de référence).
+    fn assert_contains(actual: &Value, golden: &Value, path: &str) {
+        match (actual, golden) {
+            (Value::Object(a), Value::Object(g)) => {
+                for (k, gv) in g {
+                    let av = a.get(k).unwrap_or_else(|| panic!("clé absente : {path}.{k}"));
+                    assert_contains(av, gv, &format!("{path}.{k}"));
+                }
+            }
+            _ => assert_eq!(actual, golden, "{path}"),
+        }
+    }
+
     #[test]
     fn default_state_has_the_python_shape() {
         let g = golden();
-        assert_eq!(serde_json::to_value(State::default()).unwrap(), g["default_state"]);
+        assert_contains(&serde_json::to_value(State::default()).unwrap(), &g["default_state"], "state");
         let back: State = serde_json::from_value(g["default_state"].clone()).unwrap();
         assert_eq!(back, State::default());
     }

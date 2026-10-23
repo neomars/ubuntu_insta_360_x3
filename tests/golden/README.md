@@ -11,5 +11,8 @@ limites.
 | `stabilize.json` | lissage de quaternions et matrices de stabilisation (tous les modes) | `src/stabilize.rs::matches_the_python_reference` |
 | `project.json` | état par défaut d'un projet et fusion profonde des réglages | `src/project.rs` |
 
+Les réglages ajoutés depuis le portage (distorsion, réglages d'image, perche, multi-vues…) n'existent pas dans ces
+valeurs : pour l'état par défaut, le test vérifie que chaque clé de référence est présente et égale, pas l'inverse.
+
 Pour les régénérer (rarement utile : le Python n'est plus maintenu), voir l'en-tête des scripts de
 `tools/golden/` — ils lisent la version Python depuis un `git worktree` du commit de référence.

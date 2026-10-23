@@ -342,6 +342,32 @@ pub fn output_ray(proj: &str, u: f64, v: f64, fov_deg: f64, aspect: f64) -> Vec3
     }
 }
 
+/// Comme [`output_ray`], avec la distorsion `dist` de la projection plate (perspective générale, voir
+/// `docs/ARCHITECTURE.md`). L'angle est trouvé par dichotomie sur la formule *directe*
+/// `r = (d+1) sin θ / (d + cos θ)` : sans rapport avec la forme close du moteur.
+pub fn output_ray_d(proj: &str, u: f64, v: f64, fov_deg: f64, aspect: f64, dist: f64) -> Vec3 {
+    if proj != "flat" || dist <= 0.0 {
+        return output_ray(proj, u, v, fov_deg, aspect);
+    }
+    let g = |t: f64| (dist + 1.0) * t.sin() / (dist + t.cos());
+    let limit = if dist >= 1.0 { (-1.0 / dist).acos() } else { (-dist).acos() };
+    let half = (fov_deg.to_radians() / 2.0).min(limit * 0.999);
+    let (x, y) = (u, v * aspect);
+    let target = x.hypot(y) * g(half);
+    let (mut lo, mut hi) = (0.0f64, limit * 0.999_999);
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if g(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let theta = 0.5 * (lo + hi);
+    let phi = (-y).atan2(x);
+    Vec3::new(theta.sin() * phi.cos(), theta.sin() * phi.sin(), theta.cos())
+}
+
 /// Couleur de la texture dans la direction `d` (bilinéaire, raccord en longitude).
 pub fn texture_at(tex: &Texture, d: &Vec3) -> [f64; 3] {
     let lon = d.x.atan2(d.z);
@@ -364,13 +390,26 @@ pub fn texture_at(tex: &Texture, d: &Vec3) -> [f64; 3] {
 /// Ce que doit montrer une vue `proj` de `w x h` pixels (RGB) : la texture vue par une caméra d'orientation `cam`
 /// (caméra -> monde) à travers la vue `(yaw, pitch, roll, fov)`.
 pub fn expected_view(tex: &Texture, proj: &str, w: usize, h: usize, cam: &Mat3, view: (f64, f64, f64, f64)) -> Vec<u8> {
+    expected_view_d(tex, proj, w, h, cam, view, 0.0)
+}
+
+/// Comme [`expected_view`], avec la distorsion `dist` de la projection plate.
+pub fn expected_view_d(
+    tex: &Texture,
+    proj: &str,
+    w: usize,
+    h: usize,
+    cam: &Mat3,
+    view: (f64, f64, f64, f64),
+    dist: f64,
+) -> Vec<u8> {
     let m = cam * ypr_to_matrix(view.0, view.1, view.2);
     let aspect = h as f64 / w as f64;
     let mut out = vec![0u8; w * h * 3];
     for j in 0..h {
         for i in 0..w {
             let (u, v) = ((i as f64 + 0.5) / w as f64 * 2.0 - 1.0, (j as f64 + 0.5) / h as f64 * 2.0 - 1.0);
-            let c = texture_at(tex, &(m * output_ray(proj, u, v, view.3, aspect)));
+            let c = texture_at(tex, &(m * output_ray_d(proj, u, v, view.3, aspect, dist)));
             for k in 0..3 {
                 out[(j * w + i) * 3 + k] = (c[k] + 0.5) as u8;
             }
