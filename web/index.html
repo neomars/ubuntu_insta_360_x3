@@ -59,6 +59,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="reframe" role="tab">Recadrage</button>
       <button class="tab" data-tab="image" role="tab">Image</button>
+      <button class="tab" data-tab="stick" role="tab">Perche</button>
       <button class="tab" data-tab="stab" role="tab">Stabilisation</button>
       <button class="tab" data-tab="lens" role="tab">Objectifs</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
@@ -98,6 +99,27 @@
       <div class="field"><label for="g-sharpen">Netteté</label><input id="g-sharpen" type="range" min="0" max="1" step="0.01"><output></output></div>
       <div class="field"><label for="g-denoise">Réduction du bruit</label><input id="g-denoise" type="range" min="0" max="1" step="0.01"><output></output></div>
       <p class="hint">Les réglages de couleur s'appliquent à l'aperçu et à l'export, avec le même calcul. La réduction du bruit est utile en faible lumière ; la netteté compense l'adoucissement dû à la réduction de l'image 360° en vidéo plate.</p>
+    </section>
+
+    <section class="pane" id="pane-stick">
+      <h3>Perche à selfie / nadir</h3>
+      <div class="field"><label for="k-mode">Traitement de la zone</label>
+        <select id="k-mode">
+          <option value="off">Aucun</option>
+          <option value="mirror">Reconstruction (miroir du contour)</option>
+          <option value="cover">Disque de couleur</option>
+        </select></div>
+      <div class="field"><label for="k-radius">Rayon de la zone <small>autour de l'axe de la perche</small></label><input id="k-radius" type="range" min="1" max="60" step="0.5"><output></output></div>
+      <div class="field" id="f-k-soft"><label for="k-softness">Bord adouci du disque</label><input id="k-softness" type="range" min="0" max="1" step="0.01"><output></output></div>
+      <div class="field" id="f-k-color"><label for="k-color">Couleur du disque</label><input id="k-color" type="color" value="#202020"></div>
+      <details><summary>Axe de la perche (repère de la caméra)</summary>
+        <div class="field"><label for="k-yaw">Cap</label><input id="k-yaw" type="range" min="-180" max="180" step="0.5"><output></output></div>
+        <div class="field"><label for="k-pitch">Inclinaison <small>−90° = vers le bas</small></label><input id="k-pitch" type="range" min="-90" max="90" step="0.5"><output></output></div>
+        <button id="btn-stick-axis-reset" class="btn small ghost">Vers le bas</button>
+      </details>
+      <label class="check"><input type="checkbox" id="k-show"> Surligner la zone dans l'aperçu</label>
+      <div class="row"><button id="btn-look-nadir" class="btn small">Regarder le nadir (petite planète)</button></div>
+      <p class="hint">La perche est fixée à la caméra : la zone suit le boîtier, pas la scène, et reste en place quelles que soient la vue et la stabilisation. <b>Miroir</b> reconstitue la zone avec le décor qui l'entoure, <b>disque</b> la recouvre d'une couleur unie. Le réglage s'applique à l'aperçu, aux exports et aux captures, y compris à l'export 360°.</p>
     </section>
 
     <section class="pane" id="pane-stab">

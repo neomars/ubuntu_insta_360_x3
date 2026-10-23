@@ -12,6 +12,7 @@ use crate::grade::Grade;
 use crate::media::{Layout, Source};
 pub use crate::render::MAX_DISTORTION;
 use crate::render::{perspective_limit, LensRenderer, Projection, SourceKind};
+use crate::stick::Stick;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -58,6 +59,8 @@ pub struct ExportSettings {
     pub spherical_metadata: bool,
     /// Réglages d'image (couleur sur l'image rendue ; netteté et bruit par les filtres FFmpeg).
     pub grade: Grade,
+    /// Perche à selfie / nadir : zone de la caméra à masquer.
+    pub stick: Stick,
 }
 
 impl Default for ExportSettings {
@@ -81,6 +84,7 @@ impl Default for ExportSettings {
             orientation: Ypr::default(),
             spherical_metadata: true,
             grade: Grade::default(),
+            stick: Stick::default(),
         }
     }
 }
@@ -162,6 +166,7 @@ impl ExportSettings {
             return Err(export_err("La cadence de sortie doit être comprise entre 0 (source) et 240 i/s."));
         }
         self.grade.validate()?;
+        self.stick.validate()?;
         Ok(())
     }
 }
@@ -436,7 +441,7 @@ fn make_renderer(src: &Source, calib: &Calibration, s: &ExportSettings) -> Resul
     let (ow, oh) = output_size(src, s);
     let proj = if s.mode == "reframe" { s.projection.parse::<Projection>()? } else { Projection::Equirect };
     let div = if u64::from(ow) * u64::from(oh) <= 4_200_000 { 4 } else { 8 };
-    LensRenderer::new(calib, source_kind(src), ow, oh, proj, div)
+    Ok(LensRenderer::new(calib, source_kind(src), ow, oh, proj, div)?.with_stick(&s.stick))
 }
 
 fn base_command(overwrite: bool) -> Vec<String> {

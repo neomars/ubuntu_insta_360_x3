@@ -1,7 +1,7 @@
 // Visionneuse 360° WebGL : assemble les deux fisheye (ou lit un équirectangulaire),
 // applique la stabilisation + la vue, et projette en rectiligne / fisheye / petite planète.
 // Les formules sont celles de x3studio/render.py (vérifiées contre FFmpeg v360).
-import { IDENTITY, GRADE_DEFAULT, mul3, transpose3, effectiveBlend, lensMatrices, gradeChromaShift, gradeColorIsNeutral } from './geometry.js';
+import { IDENTITY, GRADE_DEFAULT, STICK_DEFAULT, mul3, transpose3, effectiveBlend, lensMatrices, gradeChromaShift, gradeColorIsNeutral, stickUniforms } from './geometry.js';
 
 const VERT = `
 attribute vec2 aPos;
@@ -18,7 +18,30 @@ uniform int uProj, uKind;
 uniform vec4 uGA;     // réglages d'image : luminosité, contraste, 1/gamma, saturation
 uniform vec2 uGB;     // décalage de chrominance (Cb, Cr) : chaleur + teinte
 uniform float uGOn;
+uniform vec4 uStA;    // perche : axe (repère de la caméra) et mode (0 aucun, 1 miroir, 2 disque)
+uniform vec4 uStB;    // rayon, rayon opaque (rad), afficher la zone
+uniform vec3 uStP;    // vecteur orthogonal à l'axe
+uniform vec3 uStC;    // couleur du disque
 const float PI = 3.14159265359;
+
+// Perche à selfie / nadir : miroir de src/stick.rs (d : direction dans le repère de la caméra).
+vec3 stickMap(vec3 d, out float cover) {
+  cover = 0.0;
+  if (uStA.w < 0.5) return d;
+  float c = clamp(dot(d, uStA.xyz), -1.0, 1.0);
+  float a = acos(c);
+  if (uStA.w < 1.5) {
+    if (a >= uStB.x) return d;
+    vec3 e = d - c * uStA.xyz;
+    float s = length(e);
+    vec3 u = s > 1e-9 ? e / s : uStP;
+    float a2 = 2.0 * uStB.x - a;
+    return cos(a2) * uStA.xyz + sin(a2) * u;
+  }
+  float t = clamp((a - uStB.y) / (uStB.x - uStB.y), 0.0, 1.0);
+  cover = 1.0 - t * t * (3.0 - 2.0 * t);
+  return d;
+}
 
 // Réglages d'image dans l'espace Y'CbCr BT.709 : miroir de src/grade.rs.
 vec3 grade(vec3 c) {
@@ -74,13 +97,23 @@ vec4 lens(vec3 d, float side, out float theta) {
   return texture2D(uTex, vec2((p.x + side) * 0.5, p.y));
 }
 
+// Zone de la perche surlignée dans l'aperçu (jamais exportée).
+vec3 stickShow(vec3 col, vec3 d0) {
+  if (uStB.z < 0.5 || uStA.w < 0.5) return col;
+  float a = acos(clamp(dot(d0, uStA.xyz), -1.0, 1.0));
+  return a < uStB.x ? mix(col, vec3(1.0, 0.85, 0.0), 0.4) : col;
+}
+
 void main() {
-  vec3 d = uM * outRay();
+  vec3 d0 = uM * outRay();
+  float cover;
+  vec3 d = stickMap(d0, cover);
   if (uKind == 1) {
     float lon = atan(d.x, d.z);
     float lat = asin(clamp(d.y, -1.0, 1.0));
     vec3 c = texture2D(uTex, vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI)).rgb;
-    gl_FragColor = vec4(uGOn > 0.5 ? grade(c) : c, 1.0);
+    c = mix(c, uStC, cover);
+    gl_FragColor = vec4(stickShow(uGOn > 0.5 ? grade(c) : c, d0), 1.0);
     return;
   }
   float thA, thB;
@@ -96,8 +129,9 @@ void main() {
   float wA = wa * step(thA, lim), wB = (1.0 - wa) * step(thB, lim);
   float s = wA + wB;
   float w = s > 1e-5 ? wA / s : 0.5;
-  vec3 col = mix(cB.rgb, cA.rgb, w);
+  vec3 col = mix(mix(cB.rgb, cA.rgb, w), uStC, cover);
   if (uGOn > 0.5) col = grade(col);
+  col = stickShow(col, d0);
   if (uSeam > 0.5) col = mix(col, vec3(1.0, 0.0, 1.0), 0.6 * (1.0 - abs(2.0 * w - 1.0)));
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -126,7 +160,7 @@ export class Viewer {
     gl.useProgram(prog);
     this.prog = prog;
     this.u = {};
-    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uDist', 'uProj', 'uKind', 'uGA', 'uGB', 'uGOn'])
+    for (const n of ['uTex', 'uM', 'uRA', 'uRB', 'uFov', 'uAspect', 'uLensHalf', 'uBlend', 'uSwap', 'uSeam', 'uDist', 'uProj', 'uKind', 'uGA', 'uGB', 'uGOn', 'uStA', 'uStB', 'uStP', 'uStC'])
       this.u[n] = gl.getUniformLocation(prog, n);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -147,6 +181,8 @@ export class Viewer {
     this.stab = IDENTITY;       // matrice courante (sortie -> sphère de la caméra)
     this.seam = false;
     this.grade = { ...GRADE_DEFAULT };
+    this.stick = { ...STICK_DEFAULT };
+    this.showStick = false;     // surligne la zone de la perche (aperçu seulement)
     this.hasFrame = false;
   }
 
@@ -156,6 +192,7 @@ export class Viewer {
   setView(v) { this.view = v; }
   setStabMatrix(m) { this.stab = m; }
   setGrade(g) { this.grade = { ...GRADE_DEFAULT, ...g }; }
+  setStick(s) { this.stick = { ...STICK_DEFAULT, ...s }; }
 
   uploadFrame() {
     const v = this.video;
@@ -200,6 +237,11 @@ export class Viewer {
     gl.uniform4f(u.uGA, g.brightness, g.contrast, 1 / g.gamma, g.saturation);
     gl.uniform2f(u.uGB, shift[0], shift[1]);
     gl.uniform1f(u.uGOn, gradeColorIsNeutral(g) ? 0 : 1);
+    const st = stickUniforms(this.stick);
+    gl.uniform4f(u.uStA, st.axis[0], st.axis[1], st.axis[2], st.mode);
+    gl.uniform4f(u.uStB, st.rho, st.rhoIn, this.showStick ? 1 : 0, 0);
+    gl.uniform3f(u.uStP, st.perp[0], st.perp[1], st.perp[2]);
+    gl.uniform3f(u.uStC, st.rgb[0], st.rgb[1], st.rgb[2]);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

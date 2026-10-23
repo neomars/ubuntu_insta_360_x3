@@ -586,3 +586,76 @@ fn image_adjustments_are_options_checked_and_visible_in_the_commands() {
     let (plain, bright) = (mean(&[], "plain.jpg"), mean(&["--brightness", "0.2"], "bright.jpg"));
     assert!(bright > plain + 20.0, "{plain:.1} -> {bright:.1}");
 }
+
+#[test]
+fn the_selfie_stick_options_are_checked_and_applied() {
+    let e = Env::new();
+    let c = clip(
+        "stick",
+        SynthOptions { seconds: 1.0, fps: 30.0, lens: 480, motion: Motion::Static, stick: 10.0, ..Default::default() },
+    );
+    for (args, word) in [
+        (vec!["--stick", "mirror", "--stick-radius", "0.2"], "rayon"),
+        (vec!["--stick", "cover", "--stick-radius", "90"], "rayon"),
+        (vec!["--stick", "cover", "--stick-softness", "2"], "adoucissement"),
+        (vec!["--stick", "cover", "--stick-color", "rouge"], "couleur"),
+        (vec!["--stick", "mirror", "--stick-axis", "0,-120"], "inclinaison"),
+        (vec!["--stick", "mirror", "--stick-axis", "400,0"], "cap"),
+    ] {
+        let mut a = vec!["reframe", p(&c.path), "--dry-run"];
+        a.extend(args.iter().copied());
+        let r = e.x3(&a);
+        assert_eq!(r.status.code(), Some(1), "{args:?}");
+        assert!(text(&r.stderr).contains(word), "{args:?} : {}", text(&r.stderr));
+    }
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--stick", "gomme"]);
+    assert_eq!(r.status.code(), Some(2), "mode inconnu : erreur d'usage");
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--stick-axis", "10"]);
+    assert_eq!(r.status.code(), Some(2));
+    assert!(text(&r.stderr).contains("cap,inclinaison"), "{}", text(&r.stderr));
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "--dry-run",
+        "--stick",
+        "mirror",
+        "--stick-axis",
+        "0,-90",
+        "--stick-radius",
+        "15",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+
+    // la capture montre la perche sans traitement, plus rien avec
+    let shot = |name: &str, extra: &[&str]| {
+        let out = e.out(name);
+        let mut a = vec![
+            "snapshot",
+            p(&c.path),
+            "-o",
+            p(&out),
+            "--projection",
+            "fisheye",
+            "--pitch",
+            "-90",
+            "--fov",
+            "120",
+            "--size",
+            "480x480",
+            "--t",
+            "0.5",
+        ];
+        a.extend_from_slice(extra);
+        let r = e.x3(&a);
+        assert!(r.status.success(), "{}", text(&r.stderr));
+        read_image(&out).0
+    };
+    let plain = shot("plain.png", &[]);
+    assert!(magenta_count(&plain) > 3_000, "perche visible : {}", magenta_count(&plain));
+    let mirror = shot("mirror.png", &["--stick", "mirror", "--stick-radius", "20"]);
+    assert!(magenta_count(&mirror) < 30, "{}", magenta_count(&mirror));
+    let cover = shot("cover.png", &["--stick", "cover", "--stick-radius", "20", "--stick-color", "#00ff00"]);
+    assert!(magenta_count(&cover) < 30);
+    let centre = avg_rgb(&cover, 480, 240, 240, 3);
+    assert!(near(centre, [0.0, 255.0, 0.0], 30.0), "{centre:?}");
+}

@@ -15,6 +15,7 @@ use x3studio::geometry::{ypr_to_matrix, Mat3, Ypr};
 use x3studio::grade::Grade;
 use x3studio::media::{probe_source, Layout, Source};
 use x3studio::pipeline::{build_plan, build_snapshot_plan, run_plan, ExportSettings};
+use x3studio::stick::{Stick, StickMode};
 use x3studio::synth::{render_equirect, Motion, SynthOptions};
 
 const TEX: fn() -> &'static x3studio::synth::Texture = texture;
@@ -619,4 +620,169 @@ fn sharpen_adds_contrast_on_edges_and_denoise_removes_noise() {
     let (before, after) = (grain(0.0), grain(1.0));
     assert!(before > 3.0, "la vidéo de test est bruitée ({before:.2})");
     assert!(after < 0.75 * before, "bruit temporel : {before:.2} -> {after:.2}");
+}
+
+/// Perche à selfie : un cône magenta de 10° autour du nadir de la caméra, vu en fisheye depuis le dessus.
+#[test]
+fn the_selfie_stick_zone_is_rebuilt_by_mirror_or_covered() {
+    let c = clip(
+        "stick",
+        SynthOptions { seconds: 1.0, fps: 30.0, lens: 480, motion: Motion::Static, stick: 10.0, ..Default::default() },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let view = (0.0, -90.0, 0.0, 120.0);
+    let settings = |stick: Stick| {
+        fast(ExportSettings {
+            projection: "fisheye".into(),
+            width: 480,
+            height: 480,
+            end: 0.6,
+            view: json!({"yaw": view.0, "pitch": view.1, "roll": view.2, "fov": view.3}),
+            stick,
+            ..Default::default()
+        })
+    };
+    let frame_of = |name: &str, stick: Stick| {
+        let out = dir.path().join(name);
+        export(&c, &Calibration::default(), &settings(stick), &out);
+        read_frames(&out, 480, 480, "rgb24", None, Some(8)).swap_remove(4)
+    };
+    // 480 px pour 120° de champ : 4 px par degré ; le cône de 20° fait 80 px de rayon, la perche (10°) 40 px
+    let (rho_px, axis) = (80.0, x3studio::geometry::Vec3::new(0.0, -1.0, 0.0));
+    let plain = frame_of("plain.mp4", Stick::default());
+    assert!(magenta_count(&plain) > 3_500, "la perche est visible sans traitement ({} pixels)", magenta_count(&plain));
+
+    // miroir : plus aucun pixel de perche, et le centre montre l'anneau réfléchi de la scène
+    let mirror = frame_of("mirror.mp4", Stick { mode: StickMode::Mirror, radius: 20.0, ..Default::default() });
+    assert!(magenta_count(&mirror) < 30, "la perche a disparu ({} pixels)", magenta_count(&mirror));
+    let want = expected_view_stick(
+        TEX(),
+        "fisheye",
+        480,
+        480,
+        view,
+        &StickRef { mode: "mirror", radius: 20.0, softness: 0.3, axis, color: [0.0; 3] },
+    );
+    let scene = expected_view(TEX(), "fisheye", 480, 480, &Mat3::identity(), view);
+    let (inside, outside) =
+        (disc_diff(&mirror, &want, 480, 480, 12.0, rho_px), disc_diff(&mirror, &want, 480, 480, 110.0, 235.0));
+    let unprocessed = disc_diff(&mirror, &scene, 480, 480, 12.0, rho_px);
+    assert!(inside < 14.0, "zone reconstruite : écart {inside:.1} avec la réflexion attendue");
+    assert!(
+        unprocessed > 1.7 * inside,
+        "la zone n'est pas celle de la scène non traitée ({unprocessed:.1} contre {inside:.1})"
+    );
+    assert!(outside < 10.0, "hors de la zone, la scène est inchangée (écart {outside:.1})");
+
+    // disque de couleur : vert uni au centre, bord adouci, scène inchangée au-delà
+    let cover = frame_of(
+        "cover.mp4",
+        Stick { mode: StickMode::Cover, radius: 20.0, softness: 0.3, color: "#00ff00".into(), ..Default::default() },
+    );
+    assert!(magenta_count(&cover) < 30, "{} pixels de perche restent", magenta_count(&cover));
+    for (r, label) in [(0usize, "centre"), (40, "à mi-chemin")] {
+        let px = avg_rgb(&cover, 480, 240 + r, 240, 3);
+        assert!(near(px, [0.0, 255.0, 0.0], 30.0), "{label} : {px:?}");
+    }
+    let want = expected_view_stick(
+        TEX(),
+        "fisheye",
+        480,
+        480,
+        view,
+        &StickRef { mode: "cover", radius: 20.0, softness: 0.3, axis, color: [0.0, 255.0, 0.0] },
+    );
+    let (disc, beyond) =
+        (disc_diff(&cover, &want, 480, 480, 0.0, rho_px * 1.1), disc_diff(&cover, &want, 480, 480, 110.0, 235.0));
+    assert!(disc < 14.0 && beyond < 10.0, "disque {disc:.1}, au-delà {beyond:.1}");
+
+    // une zone désactivée ne change rien, et la zone est fixe dans le repère de la caméra : la perche ne suit pas la vue
+    let off = frame_of("off.mp4", Stick { mode: StickMode::Off, radius: 40.0, ..Default::default() });
+    assert!(mean_abs_diff(&off, &plain) < 1.0);
+    let side = ExportSettings {
+        view: json!({"yaw": 0, "pitch": 0, "fov": 90}),
+        projection: "flat".into(),
+        stick: Stick { mode: StickMode::Mirror, radius: 20.0, ..Default::default() },
+        ..settings(Stick::default())
+    };
+    let out = dir.path().join("side.mp4");
+    export(&c, &Calibration::default(), &side, &out);
+    let horizon = read_frames(&out, 480, 480, "rgb24", None, Some(8)).swap_remove(4);
+    let plain_side = {
+        let out = dir.path().join("side0.mp4");
+        export(&c, &Calibration::default(), &ExportSettings { stick: Stick::default(), ..side.clone() }, &out);
+        read_frames(&out, 480, 480, "rgb24", None, Some(8)).swap_remove(4)
+    };
+    assert!(
+        mean_abs_diff(&horizon, &plain_side) < 1.0,
+        "regarder l'horizon : la zone du nadir n'est pas dans le champ"
+    );
+}
+
+/// Export 360° et source déjà assemblée : la perche (bas de l'image équirectangulaire) disparaît aussi.
+#[test]
+fn the_stick_is_removed_from_360_exports_and_from_stitched_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let dual = clip(
+        "stick360",
+        SynthOptions { seconds: 1.0, fps: 30.0, lens: 480, motion: Motion::Static, stick: 10.0, ..Default::default() },
+    );
+    let stitched = equirect_clip(
+        "stick360-eq",
+        960,
+        SynthOptions { seconds: 1.0, fps: 30.0, motion: Motion::Static, stick: 10.0, ..Default::default() },
+    );
+    for (label, src, stick) in [
+        ("sans traitement", &dual, Stick::default()),
+        ("miroir", &dual, Stick { mode: StickMode::Mirror, radius: 18.0, ..Default::default() }),
+        (
+            "disque",
+            &dual,
+            Stick { mode: StickMode::Cover, radius: 18.0, color: "#336699".into(), ..Default::default() },
+        ),
+    ] {
+        let s =
+            fast(ExportSettings { mode: "equirect".into(), stitch_width: 960, end: 0.5, stick, ..Default::default() });
+        let out = dir.path().join(format!("{label}.mp4"));
+        export(src, &Calibration::default(), &s, &out);
+        let img = read_frames(&out, 960, 480, "rgb24", None, Some(6)).swap_remove(3);
+        // le bas de l'image (les 60 dernières lignes, 22° autour du nadir) : le reste de la scène n'est pas en cause
+        let n = magenta_count(&img[960 * 3 * 420..]);
+        if label == "sans traitement" {
+            assert!(n > 960 * 15, "{label} : la bande de la perche est visible ({n} pixels)");
+        } else {
+            assert!(n < 120, "{label} : {n} pixels de perche");
+        }
+    }
+    // la source est déjà assemblée : le cône est évalué sur l'image équirectangulaire
+    for (label, stick) in [
+        ("source assemblée, miroir", Stick { mode: StickMode::Mirror, radius: 18.0, ..Default::default() }),
+        ("source assemblée, disque", Stick { mode: StickMode::Cover, radius: 18.0, ..Default::default() }),
+    ] {
+        let s = fast(ExportSettings {
+            projection: "fisheye".into(),
+            width: 480,
+            height: 480,
+            end: 0.5,
+            view: json!({"yaw": 0, "pitch": -90, "fov": 120}),
+            stick,
+            ..Default::default()
+        });
+        let out = dir.path().join(format!("{label}.mp4"));
+        export(&stitched, &Calibration::default(), &s, &out);
+        let img = read_frames(&out, 480, 480, "rgb24", None, Some(6)).swap_remove(3);
+        assert!(magenta_count(&img) < 60, "{label} : {} pixels de perche", magenta_count(&img));
+    }
+    let plain = fast(ExportSettings {
+        projection: "fisheye".into(),
+        width: 480,
+        height: 480,
+        end: 0.5,
+        view: json!({"yaw": 0, "pitch": -90, "fov": 120}),
+        ..Default::default()
+    });
+    let out = dir.path().join("eq-plain.mp4");
+    export(&stitched, &Calibration::default(), &plain, &out);
+    let img = read_frames(&out, 480, 480, "rgb24", None, Some(6)).swap_remove(3);
+    assert!(magenta_count(&img) > 3_500, "la perche de la source assemblée est visible sans traitement");
 }

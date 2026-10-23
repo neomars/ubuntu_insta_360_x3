@@ -1,5 +1,5 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, MAX_DISTORTION, fmtTime, fovRange, gradeWithDefaults, interpolateView, mul3, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, mul3, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
@@ -207,6 +207,8 @@ function adoptProject(p) {
   viewer && viewer.setCalibration(S.st.calibration);
   S.st.grade = gradeWithDefaults(S.st.grade);
   viewer && viewer.setGrade(S.st.grade);
+  S.st.stick = stickWithDefaults(S.st.stick);
+  viewer && viewer.setStick(S.st.stick);
   setProjectionUI();
   bindStateToControls();
   renderKeyframes();
@@ -446,6 +448,7 @@ function bindStateToControls() {
     if (el.type === 'checkbox') el.checked = !!c[k]; else setOut('#c-' + k, c[k], '°');
   }
   for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
+  syncStickControls();
   updateAnalysisStatus();
 }
 function setOut(sel, v, unit) {
@@ -525,6 +528,34 @@ $('#btn-grade-reset').addEventListener('click', () => {
   for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
   viewer && viewer.setGrade(S.st.grade); S.dirty = true; scheduleSave('grade');
 });
+
+// ---------------------------------------------------------------- perche à selfie / nadir
+function syncStickControls() {
+  const k = S.st.stick;
+  $('#k-mode').value = k.mode;
+  for (const [id, key, unit] of [['#k-radius', 'radius', '°'], ['#k-yaw', 'yaw', '°'], ['#k-pitch', 'pitch', '°']]) {
+    if (document.activeElement !== $(id)) $(id).value = k[key];
+    $(id).parentElement.querySelector('output').textContent = `${(+k[key]).toFixed(1)}${unit}`;
+  }
+  if (document.activeElement !== $('#k-softness')) $('#k-softness').value = k.softness;
+  $('#k-softness').parentElement.querySelector('output').textContent = (+k.softness).toFixed(2);
+  $('#k-color').value = k.color;
+  $('#f-k-soft').hidden = $('#f-k-color').hidden = k.mode !== 'cover';
+  $('#k-radius').disabled = k.mode === 'off';
+}
+function editStick(patch) {
+  if (!S.st) return;
+  S.st.stick = { ...S.st.stick, ...patch };
+  syncStickControls(); viewer && viewer.setStick(S.st.stick); S.dirty = true; scheduleSave('stick');
+}
+$('#k-mode').addEventListener('change', (e) => editStick({ mode: e.target.value }));
+for (const [id, key] of [['#k-radius', 'radius'], ['#k-softness', 'softness'], ['#k-yaw', 'yaw'], ['#k-pitch', 'pitch']]) {
+  $(id).addEventListener('input', (e) => editStick({ [key]: parseFloat(e.target.value) }));
+}
+$('#k-color').addEventListener('input', (e) => editStick({ color: e.target.value }));
+$('#btn-stick-axis-reset').addEventListener('click', () => editStick({ yaw: STICK_DEFAULT.yaw, pitch: STICK_DEFAULT.pitch }));
+$('#k-show').addEventListener('change', (e) => { if (viewer) viewer.showStick = e.target.checked; S.dirty = true; });
+$('#btn-look-nadir').addEventListener('click', () => applyPreset('planete'));
 
 // ---------------------------------------------------------------- objectifs (calibration)
 for (const k of ['fov', 'blend', 'a_yaw', 'a_pitch', 'a_roll', 'b_yaw', 'b_pitch', 'b_roll']) {

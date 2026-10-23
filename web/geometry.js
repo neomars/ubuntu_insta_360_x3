@@ -99,6 +99,27 @@ export function gradeColorIsNeutral(g) {
   return ['brightness', 'contrast', 'saturation', 'gamma', 'warmth', 'tint'].every((k) => g[k] === GRADE_DEFAULT[k]);
 }
 
+// Perche à selfie / nadir : miroir de src/stick.rs.
+export const STICK_DEFAULT = { mode: 'off', radius: 20, softness: 0.3, yaw: 0, pitch: -90, color: '#202020' };
+export const STICK_MODES = { off: 0, mirror: 1, cover: 2 };
+const STICK_MIN_SOFTNESS = 0.02;
+
+export function stickWithDefaults(st) { return Object.assign({}, STICK_DEFAULT, st || {}); }
+
+// Valeurs des uniformes du shader : axe (repère de la caméra), vecteur orthogonal, rayons (rad), couleur RVB 0..1.
+export function stickUniforms(st) {
+  const yaw = st.yaw * D2R, pitch = st.pitch * D2R;
+  const axis = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+  const helper = Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 0, 1];
+  const c = [axis[1] * helper[2] - axis[2] * helper[1], axis[2] * helper[0] - axis[0] * helper[2], axis[0] * helper[1] - axis[1] * helper[0]];
+  const n = Math.hypot(c[0], c[1], c[2]);
+  const rho = Math.min(60, Math.max(1, st.radius)) * D2R;
+  const soft = Math.min(1, Math.max(STICK_MIN_SOFTNESS, st.softness));
+  const hex = /^#[0-9a-fA-F]{6}$/.test(st.color) ? st.color : STICK_DEFAULT.color;
+  const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  return { axis, perp: c.map((v) => v / n), mode: STICK_MODES[st.mode] ?? 0, rho, rhoIn: rho * (1 - soft), rgb };
+}
+
 export function fmtTime(t) {
   if (!isFinite(t)) return '0:00.0';
   const m = Math.floor(t / 60), s = t - m * 60;

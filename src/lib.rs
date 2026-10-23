@@ -19,6 +19,7 @@ pub mod render;
 pub mod server;
 pub mod spherical;
 pub mod stabilize;
+pub mod stick;
 pub mod synth;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

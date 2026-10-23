@@ -113,9 +113,13 @@ export async function settle(page, timeout = 20000) {
   await sleep(250);
 }
 
-/** Écart de pixels (0..1) entre le canvas WebGL et l'image de la vue calculée par le serveur (`/frame`), réduits 3x par moyenne de blocs. */
-export function previewVsExport(page) {
-  return page.evaluate(async () => {
+/**
+ * Écart de pixels (0..1) entre le canvas WebGL et l'image de la vue calculée par le serveur (`/frame`), réduits 3x par
+ * moyenne de blocs. `region` = [x0, y0, x1, y1] en fractions de l'image : ne compare que ce rectangle (un détail
+ * localisé, comme la zone de la perche, se noie dans la moyenne de toute l'image).
+ */
+export function previewVsExport(page, region = [0, 0, 1, 1]) {
+  return page.evaluate(async (region) => {
     const X = window.__x3;
     const gl = document.getElementById('gl');
     const w = (gl.width >> 1) << 1, h = (gl.height >> 1) << 1;
@@ -132,8 +136,9 @@ export function previewVsExport(page) {
     const shot = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = gl.toDataURL('image/png'); });
     const a = grab(shot, shot.width, shot.height), b = grab(bmp, bmp.width, bmp.height);
     const K = 3, bw = Math.floor(w / K), bh = Math.floor(h / K);
+    const [bx0, by0, bx1, by1] = [region[0] * bw, region[1] * bh, region[2] * bw, region[3] * bh].map(Math.round);
     let sum = 0, n = 0;
-    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) for (let ch = 0; ch < 3; ch++) {
+    for (let by = by0; by < by1; by++) for (let bx = bx0; bx < bx1; bx++) for (let ch = 0; ch < 3; ch++) {
       let sa = 0, sb = 0;
       for (let dy = 0; dy < K; dy++) for (let dx = 0; dx < K; dx++) {
         const i = ((by * K + dy) * w + bx * K + dx) * 4 + ch; sa += a[i]; sb += b[i];
@@ -141,7 +146,7 @@ export function previewVsExport(page) {
       sum += Math.abs(sa - sb) / (K * K); n++;
     }
     return { diff: sum / n / 255, w, h };
-  });
+  }, region);
 }
 
 /** Image du canvas WebGL : écart type des niveaux de gris (une vraie scène, pas un écran uni) et moyenne. */

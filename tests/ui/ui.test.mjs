@@ -171,7 +171,7 @@ describe('interface X3 Studio Local', () => {
       await sleep(600);
       const before = await canvasThumb(page);
       await page.click('.tab[data-tab=lens]');
-      await page.click('summary');
+      await page.click('#pane-lens summary');
       await page.fill('#c-b_yaw', '8');
       await page.dispatchEvent('#c-b_yaw', 'input');
       await sleep(600);
@@ -467,6 +467,105 @@ describe('interface X3 Studio Local', () => {
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       assert.ok(meanAbsDiff(plain, await canvasThumb(page)) < 1.5, "après réinitialisation, l'image est celle d'origine");
       await parity('après réinitialisation');
+    });
+  });
+
+  it("perche à selfie : miroir et disque de couleur, aperçu identique à l'export, enregistré par projet", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('perche'));
+      await page.click('.tab[data-tab=stick]');
+      const stick = () => page.evaluate('window.__x3.S.st.stick');
+      const set = (id, value) => page.evaluate(([id, value]) => {
+        const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true }));
+      }, [id, String(value)]);
+      const redraw = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      // écart sur le centre de l'image (le quart central d'une vignette de 64 x 64 pixels)
+      const centreDiff = (a, b) => {
+        let sum = 0, n = 0;
+        for (let y = 24; y < 40; y++) for (let x = 24; x < 40; x++) for (let c = 0; c < 3; c++) { sum += Math.abs(a[(y * 64 + x) * 4 + c] - b[(y * 64 + x) * 4 + c]); n++; }
+        return sum / n;
+      };
+      assert.equal((await stick()).mode, 'off');
+      assert.ok(await page.locator('#f-k-color').isHidden(), 'la couleur ne sert qu\'au disque');
+      // on regarde le nadir : le préréglage « petite planète » le place au centre de l'image
+      await page.click('#btn-look-nadir');
+      await settle(page); await sleep(400);
+      const plain = await canvasThumb(page);
+      // la zone de la perche est petite : on compare le centre de l'image (le nadir), où elle se trouve
+      const centre = [0.3, 0.25, 0.7, 0.75];
+      const parity = async (label, region = centre, limit = 0.02) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page, region);
+        assert.ok(diff < limit, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      await parity('sans traitement');
+
+      // miroir
+      await page.selectOption('#k-mode', 'mirror');
+      await set('k-radius', 30);
+      assert.deepEqual((({ mode, radius }) => ({ mode, radius }))(await stick()), { mode: 'mirror', radius: 30 });
+      await redraw();
+      assert.ok(centreDiff(plain, await canvasThumb(page)) > 8, 'le miroir change le centre de l\'aperçu');
+      await page.evaluate('window.__x3.flushSave()');
+      await parity('miroir');
+
+      // disque de couleur
+      await page.selectOption('#k-mode', 'cover');
+      assert.ok(await page.locator('#f-k-color').isVisible());
+      await page.evaluate(() => { const e = document.getElementById('k-color'); e.value = '#c0392b'; e.dispatchEvent(new Event('input', { bubbles: true })); });
+      await set('k-radius', 35); await set('k-softness', 0.4);
+      await redraw();
+      const middle = await page.evaluate(() => {
+        const c = document.getElementById('gl'), img = new Image();
+        return new Promise((res) => { img.onload = () => {
+          const k = document.createElement('canvas'); k.width = img.width; k.height = img.height;
+          const x = k.getContext('2d'); x.drawImage(img, 0, 0);
+          res(Array.from(x.getImageData(img.width >> 1, img.height >> 1, 1, 1).data));
+        }; img.src = c.toDataURL('image/png'); });
+      });
+      assert.ok(Math.abs(middle[0] - 0xc0) < 6 && Math.abs(middle[1] - 0x39) < 6 && Math.abs(middle[2] - 0x2b) < 6, `centre ${middle}`);
+      await page.evaluate('window.__x3.flushSave()');
+      await parity('disque');
+
+      // la zone surlignée n'est qu'un repère : elle change l'aperçu, jamais l'export
+      const before = await canvasThumb(page);
+      await page.check('#k-show');
+      await redraw();
+      assert.ok(centreDiff(before, await canvasThumb(page)) > 8, 'zone surlignée');
+      await page.uncheck('#k-show');
+
+      // la zone est fixe dans le repère de la caméra : vue de côté, stabilisation verrouillée
+      await page.selectOption('#k-mode', 'mirror'); await set('k-radius', 40);
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 40, pitch: -50, roll: 8, fov: 110, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'lock'; S.override = null;
+        X.viewer.setProjection('flat');
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(1.0); S.dirty = true;
+      });
+      await parity('vue de côté, stabilisation verrouillée', [0, 0, 1, 1], 0.03);
+
+      // l'axe se règle, se réinitialise et tout est enregistré sur disque
+      await page.click('#pane-stick summary');
+      await set('k-yaw', 35); await set('k-pitch', -60);
+      assert.equal((await stick()).yaw, 35);
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.deepEqual(saved.stick, { mode: 'mirror', radius: 40, softness: 0.4, yaw: 35, pitch: -60, color: '#c0392b' });
+      await page.click('#btn-stick-axis-reset');
+      assert.deepEqual((({ yaw, pitch }) => ({ yaw, pitch }))(await stick()), { yaw: 0, pitch: -90 });
+      // le serveur refuse un rayon hors bornes
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { stick: { radius: 99 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /rayon/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // aucun traitement : retour à l'image d'origine
+      await page.selectOption('#k-mode', 'off');
+      assert.equal((await stick()).mode, 'off');
     });
   });
 });

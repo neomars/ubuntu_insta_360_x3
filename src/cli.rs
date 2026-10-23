@@ -12,6 +12,7 @@ use crate::media::{probe_source, Layout};
 use crate::pipeline::{self, default_fov, ExportSettings};
 use crate::project::{Project, StabOverride};
 use crate::stabilize::StabMode;
+use crate::stick::{Stick, StickMode};
 use crate::synth::{make_synthetic_insv, Motion, SynthOptions};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -150,6 +151,21 @@ struct ExportArgs {
     /// Réduction du bruit, de 0 à 1
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
     denoise: f64,
+    /// Perche à selfie / nadir : `mirror` (reconstruction par réflexion) ou `cover` (disque de couleur)
+    #[arg(long, default_value = "off", value_parser = ["off", "mirror", "cover"])]
+    stick: String,
+    /// Demi-angle (°) de la zone de la perche, de 1 à 60
+    #[arg(long, default_value_t = 20.0, allow_hyphen_values = true)]
+    stick_radius: f64,
+    /// Adoucissement du bord du disque de couleur, de 0 à 1
+    #[arg(long, default_value_t = 0.3, allow_hyphen_values = true)]
+    stick_softness: f64,
+    /// Axe de la perche dans le repère de la caméra : cap,inclinaison (°) ; par défaut 0,-90 (vers le bas)
+    #[arg(long, value_parser = parse_pair, allow_hyphen_values = true)]
+    stick_axis: Option<(f64, f64)>,
+    /// Couleur du disque (#rrggbb)
+    #[arg(long, default_value = "#202020")]
+    stick_color: String,
 }
 
 /// Options de la vue de la caméra virtuelle.
@@ -228,6 +244,16 @@ fn parse_size(txt: &str) -> std::result::Result<(u32, u32), String> {
     let bad = || "format attendu : LARGEURxHAUTEUR (ex. 1920x1080)".to_string();
     let (w, h) = txt.to_lowercase().split_once('x').map(|(w, h)| (w.to_string(), h.to_string())).ok_or_else(bad)?;
     Ok((w.trim().parse().map_err(|_| bad())?, h.trim().parse().map_err(|_| bad())?))
+}
+
+fn parse_pair(txt: &str) -> std::result::Result<(f64, f64), String> {
+    let bad = || "format attendu : cap,inclinaison (ex. 0,-90)".to_string();
+    let v: Vec<f64> =
+        txt.split(',').map(|p| p.trim().parse::<f64>().map_err(|_| bad())).collect::<std::result::Result<_, _>>()?;
+    match v[..] {
+        [a, b] if v.iter().all(|x| x.is_finite()) => Ok((a, b)),
+        _ => Err(bad()),
+    }
 }
 
 fn parse_triplet(txt: &str) -> std::result::Result<Ypr, String> {
@@ -331,6 +357,18 @@ fn settings(args: &ExportArgs) -> ExportSettings {
             sharpen: args.sharpen,
             denoise: args.denoise,
         },
+        stick: Stick {
+            mode: match args.stick.as_str() {
+                "mirror" => StickMode::Mirror,
+                "cover" => StickMode::Cover,
+                _ => StickMode::Off,
+            },
+            radius: args.stick_radius,
+            softness: args.stick_softness,
+            yaw: args.stick_axis.map_or(0.0, |a| a.0),
+            pitch: args.stick_axis.map_or(-90.0, |a| a.1),
+            color: args.stick_color.clone(),
+        },
         ..Default::default()
     }
 }
@@ -392,6 +430,8 @@ fn run_export(
         ("--tint", args.tint),
         ("--sharpen", args.sharpen),
         ("--denoise", args.denoise),
+        ("--stick-radius", args.stick_radius),
+        ("--stick-softness", args.stick_softness),
     ])?;
     let stab = stab_matrices(p, args)?;
     let ext = if snapshot_t.is_some() { "jpg" } else { "mp4" };

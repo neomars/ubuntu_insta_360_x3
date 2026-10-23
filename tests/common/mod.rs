@@ -418,6 +418,84 @@ pub fn expected_view_d(
     out
 }
 
+/// Zone de la perche attendue (voir `src/stick.rs`) : ce que doit montrer la vue une fois la zone traitée.
+pub struct StickRef {
+    /// `"mirror"` ou `"cover"`.
+    pub mode: &'static str,
+    /// Demi-angle du cône (degrés) et adoucissement du disque de couleur.
+    pub radius: f64,
+    pub softness: f64,
+    /// Axe du cône dans le repère de la caméra (unitaire).
+    pub axis: Vec3,
+    /// Couleur du disque (RVB 0..255).
+    pub color: [f64; 3],
+}
+
+/// Comme [`expected_view_d`] (caméra immobile, stabilisation nulle : le repère de la caméra est celui du monde), avec
+/// la zone de la perche traitée. Le miroir est une rotation de Rodrigues dans le plan de l'axe et de la direction.
+pub fn expected_view_stick(
+    tex: &Texture,
+    proj: &str,
+    w: usize,
+    h: usize,
+    view: (f64, f64, f64, f64),
+    stick: &StickRef,
+) -> Vec<u8> {
+    let m = ypr_to_matrix(view.0, view.1, view.2);
+    let aspect = h as f64 / w as f64;
+    let rho = stick.radius.to_radians();
+    let rho_in = rho * (1.0 - stick.softness.max(0.02));
+    let mut out = vec![0u8; w * h * 3];
+    for j in 0..h {
+        for i in 0..w {
+            let (u, v) = ((i as f64 + 0.5) / w as f64 * 2.0 - 1.0, (j as f64 + 0.5) / h as f64 * 2.0 - 1.0);
+            let d = m * output_ray_d(proj, u, v, view.3, aspect, 0.0);
+            let angle = d.dot(&stick.axis).clamp(-1.0, 1.0).acos();
+            let (dir, alpha) = match stick.mode {
+                "mirror" if angle < rho && angle > 1e-6 => {
+                    let n = stick.axis.cross(&d).normalize();
+                    let t = 2.0 * rho - 2.0 * angle;
+                    (d * t.cos() + n.cross(&d) * t.sin(), 0.0)
+                }
+                "cover" => {
+                    let t = ((angle - rho_in) / (rho - rho_in)).clamp(0.0, 1.0);
+                    (d, 1.0 - t * t * (3.0 - 2.0 * t))
+                }
+                _ => (d, 0.0),
+            };
+            let c = texture_at(tex, &dir);
+            for k in 0..3 {
+                out[(j * w + i) * 3 + k] = (c[k] * (1.0 - alpha) + stick.color[k] * alpha + 0.5) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Nombre de pixels « couleur de la perche » (magenta presque pur, que les formes aléatoires de la texture n'ont
+/// pratiquement jamais) d'une image RGB.
+pub fn magenta_count(img: &[u8]) -> usize {
+    img.chunks(3).filter(|p| p[0] > 225 && p[1] < 40 && p[2] > 225).count()
+}
+
+/// Écart absolu moyen sur le disque de rayon `r` (pixels) centré sur l'image, ou sur la couronne `r0..r1` si `ring`.
+pub fn disc_diff(a: &[u8], b: &[u8], w: usize, h: usize, r0: f64, r1: f64) -> f64 {
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let (mut sum, mut n) = (0.0, 0.0);
+    for y in 0..h {
+        for x in 0..w {
+            let r = (x as f64 + 0.5 - cx).hypot(y as f64 + 0.5 - cy);
+            if r >= r0 && r < r1 {
+                for k in 0..3 {
+                    sum += (f64::from(a[(y * w + x) * 3 + k]) - f64::from(b[(y * w + x) * 3 + k])).abs();
+                    n += 1.0;
+                }
+            }
+        }
+    }
+    sum / n
+}
+
 // ---------------------------------------------------------------------------
 // Dérivés de vidéos et inspection
 // ---------------------------------------------------------------------------
