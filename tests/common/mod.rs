@@ -472,6 +472,11 @@ pub fn expected_view_stick(
     out
 }
 
+/// Le rectangle `(x, y, w, h)` d'une image RGB de largeur `width`.
+pub fn crop_rgb(img: &[u8], width: usize, (x, y, w, h): (usize, usize, usize, usize)) -> Vec<u8> {
+    (y..y + h).flat_map(|row| img[(row * width + x) * 3..(row * width + x + w) * 3].iter().copied()).collect()
+}
+
 /// Nombre de pixels « couleur de la perche » (magenta presque pur, que les formes aléatoires de la texture n'ont
 /// pratiquement jamais) d'une image RGB.
 pub fn magenta_count(img: &[u8]) -> usize {

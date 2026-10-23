@@ -1,7 +1,7 @@
 // Visionneuse 360° WebGL : assemble les deux fisheye (ou lit un équirectangulaire),
 // applique la stabilisation + la vue, et projette en rectiligne / fisheye / petite planète.
 // Les formules sont celles de x3studio/render.py (vérifiées contre FFmpeg v360).
-import { IDENTITY, GRADE_DEFAULT, STICK_DEFAULT, mul3, transpose3, effectiveBlend, lensMatrices, gradeChromaShift, gradeColorIsNeutral, stickUniforms } from './geometry.js';
+import { IDENTITY, GRADE_DEFAULT, STICK_DEFAULT, mul3, transpose3, effectiveBlend, lensMatrices, gradeChromaShift, gradeColor, gradeColorIsNeutral, layoutRects, stickUniforms } from './geometry.js';
 
 const VERT = `
 attribute vec2 aPos;
@@ -183,6 +183,9 @@ export class Viewer {
     this.grade = { ...GRADE_DEFAULT };
     this.stick = { ...STICK_DEFAULT };
     this.showStick = false;     // surligne la zone de la perche (aperçu seulement)
+    this.layout = 'single';     // plusieurs perspectives : disposition, écart (px) et vues 2, 3…
+    this.gap = 0;
+    this.extra = [];            // [{ projection, view, matrix }]
     this.hasFrame = false;
   }
 
@@ -192,6 +195,7 @@ export class Viewer {
   setView(v) { this.view = v; }
   setStabMatrix(m) { this.stab = m; }
   setGrade(g) { this.grade = { ...GRADE_DEFAULT, ...g }; }
+  setLayout(layout, gap, extra) { this.layout = layout; this.gap = gap; this.extra = extra; }
   setStick(s) { this.stick = { ...STICK_DEFAULT, ...s }; }
 
   uploadFrame() {
@@ -210,28 +214,23 @@ export class Viewer {
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
   }
 
-  // matrice de vue : sortie -> sphère = stab · V(yaw,pitch,roll) (voir geometry.py)
+  // matrice de vue : sortie -> sphère = stab · V(yaw,pitch,roll) (voir geometry.py) ; `viewMatrix` est celle de la
+  // première vue, les suivantes (disposition à plusieurs vues) sont dans `this.extra`
   draw(viewMatrix) {
     const gl = this.gl, u = this.u, c = this.calib;
     this.resize();
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    const M = mul3(this.stab, viewMatrix);
+    const W = this.canvas.width, H = this.canvas.height;
     const [ra, rb] = lensMatrices(c);
     const col = (m) => new Float32Array(transpose3(m));   // GLSL attend du colonne-majeur
     gl.useProgram(this.prog);
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.uniform1i(u.uTex, 0);
-    gl.uniformMatrix3fv(u.uM, false, col(M));
     gl.uniformMatrix3fv(u.uRA, false, col(ra));
     gl.uniformMatrix3fv(u.uRB, false, col(rb));
-    gl.uniform1f(u.uFov, this.view.fov * Math.PI / 180);
-    gl.uniform1f(u.uAspect, this.canvas.height / this.canvas.width);
     gl.uniform1f(u.uLensHalf, c.fov * Math.PI / 360);
     gl.uniform1f(u.uBlend, effectiveBlend(c));
     gl.uniform1f(u.uSwap, c.swap_lenses ? 1 : 0);
     gl.uniform1f(u.uSeam, this.seam ? 1 : 0);
-    gl.uniform1f(u.uDist, this.projection === 'flat' ? Math.min(2, Math.max(0, this.view.distortion || 0)) : 0);
-    gl.uniform1i(u.uProj, PROJ[this.projection] ?? 0);
     gl.uniform1i(u.uKind, this.kind === 'equirect' ? 1 : 0);
     const g = this.grade, shift = gradeChromaShift(g);
     gl.uniform4f(u.uGA, g.brightness, g.contrast, 1 / g.gamma, g.saturation);
@@ -242,6 +241,24 @@ export class Viewer {
     gl.uniform4f(u.uStB, st.rho, st.rhoIn, this.showStick ? 1 : 0, 0);
     gl.uniform3f(u.uStP, st.perp[0], st.perp[1], st.perp[2]);
     gl.uniform3f(u.uStC, st.rgb[0], st.rgb[1], st.rgb[2]);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const rects = layoutRects(this.layout, W, H, this.gap);
+    if (rects.length > 1) {
+      // le fond des écarts est du noir, auquel l'export applique aussi les réglages d'image
+      const bg = gradeColor(g, [0, 0, 0]);
+      gl.viewport(0, 0, W, H);
+      gl.clearColor(bg[0], bg[1], bg[2], 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    rects.forEach((r, i) => {
+      const tile = i === 0 ? { projection: this.projection, view: this.view, matrix: viewMatrix } : this.extra[i - 1];
+      if (!tile || r.w < 1 || r.h < 1) return;
+      gl.viewport(r.x, H - r.y - r.h, r.w, r.h);
+      gl.uniformMatrix3fv(u.uM, false, col(mul3(this.stab, tile.matrix)));
+      gl.uniform1f(u.uFov, tile.view.fov * Math.PI / 180);
+      gl.uniform1f(u.uAspect, r.h / r.w);
+      gl.uniform1f(u.uDist, tile.projection === 'flat' ? Math.min(2, Math.max(0, tile.view.distortion || 0)) : 0);
+      gl.uniform1i(u.uProj, PROJ[tile.projection] ?? 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    });
   }
 }

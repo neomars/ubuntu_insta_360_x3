@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod grade;
 pub mod jobs;
 pub mod media;
+pub mod multi;
 pub mod pipeline;
 pub mod project;
 pub mod render;

@@ -659,3 +659,88 @@ fn the_selfie_stick_options_are_checked_and_applied() {
     let centre = avg_rgb(&cover, 480, 240, 240, 3);
     assert!(near(centre, [0.0, 255.0, 0.0], 30.0), "{centre:?}");
 }
+
+#[test]
+fn several_views_from_the_command_line() {
+    let e = Env::new();
+    let c = static_clip();
+    // avant et arrière côte à côte, sans rien d'autre à préciser
+    let out = e.out("side.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&out),
+        "--layout",
+        "side",
+        "--size",
+        "640x360",
+        "--end",
+        "0.5",
+        "--preset",
+        "ultrafast",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frame = read_frames(&out, 640, 360, "rgb24", None, Some(6)).swap_remove(3);
+    let tex = texture();
+    for (i, yaw) in [(0usize, 0.0), (1, 180.0)] {
+        let got = crop_rgb(&frame, 640, (i * 320, 0, 320, 360));
+        let want = expected_view(tex, "flat", 320, 360, &x3studio::geometry::Mat3::identity(), (yaw, 0.0, 0.0, 90.0));
+        let err = mean_abs_diff(&downscale_rgb(&got, 320, 360, 4).0, &downscale_rgb(&want, 320, 360, 4).0);
+        assert!(err < 10.0, "vue {} : écart {err:.2}", i + 1);
+    }
+    // les vues 2, 3… viennent d'un fichier JSON
+    let views = e.out("views.json");
+    std::fs::write(&views, r#"[{"projection": "fisheye", "view": {"yaw": 90, "fov": 160}}]"#).unwrap();
+    let out2 = e.out("pip.mp4");
+    let r = e.x3(&[
+        "reframe",
+        p(&c.path),
+        "-o",
+        p(&out2),
+        "--layout",
+        "pip",
+        "--views",
+        p(&views),
+        "--size",
+        "640x360",
+        "--end",
+        "0.5",
+        "--preset",
+        "ultrafast",
+        "--layout-gap",
+        "8",
+    ]);
+    assert!(r.status.success(), "{}", text(&r.stderr));
+    let frame = read_frames(&out2, 640, 360, "rgb24", None, Some(6)).swap_remove(3);
+    let rects = x3studio::multi::layout_rects(x3studio::multi::MultiLayout::Pip, 640, 360, 8);
+    let inset = rects[1];
+    let got = crop_rgb(&frame, 640, (inset.x as usize, inset.y as usize, inset.w as usize, inset.h as usize));
+    let want = expected_view(
+        tex,
+        "fisheye",
+        inset.w as usize,
+        inset.h as usize,
+        &x3studio::geometry::Mat3::identity(),
+        (90.0, 0.0, 0.0, 160.0),
+    );
+    let (w, h) = (inset.w as usize, inset.h as usize);
+    let err = mean_abs_diff(&downscale_rgb(&got, w, h, 4).0, &downscale_rgb(&want, w, h, 4).0);
+    assert!(err < 10.0, "incrustation : écart {err:.2}");
+    // erreurs claires
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--layout-gap", "6"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("multiple de 4"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "quad", "--size", "128x72"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("trop petite"), "{}", text(&r.stderr));
+    let bad = e.out("bad.json");
+    std::fs::write(&bad, "{pas un tableau").unwrap();
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--views", p(&bad)]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(text(&r.stderr).contains("Vues invalides"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "side", "--views", p(&e.out("absent.json"))]);
+    assert!(text(&r.stderr).contains("Vues illisibles"), "{}", text(&r.stderr));
+    let r = e.x3(&["reframe", p(&c.path), "--dry-run", "--layout", "mosaique"]);
+    assert_eq!(r.status.code(), Some(2));
+}

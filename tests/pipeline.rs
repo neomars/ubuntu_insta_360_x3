@@ -12,8 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use x3studio::calibration::Calibration;
 use x3studio::error::{is_cancelled, is_user_error};
 use x3studio::geometry::{ypr_to_matrix, Mat3, Ypr};
+use x3studio::geometry::{Keyframe, View};
 use x3studio::grade::Grade;
 use x3studio::media::{probe_source, Layout, Source};
+use x3studio::multi::{layout_rects, Multi, MultiLayout, TileView};
 use x3studio::pipeline::{build_plan, build_snapshot_plan, run_plan, ExportSettings};
 use x3studio::stick::{Stick, StickMode};
 use x3studio::synth::{render_equirect, Motion, SynthOptions};
@@ -517,8 +519,8 @@ fn user_orientation_matrix_is_applied_in_the_plan() {
     };
     let plan = build_plan(&src, &Calibration::default(), &s, Path::new("/tmp/x.mp4"), None).unwrap();
     let want = ypr_to_matrix(20.0, -5.0, 3.0).transpose() * ypr_to_matrix(10.0, 4.0, 1.0);
-    assert!((plan.mats[0] - want).abs().max() < 1e-12);
-    assert_eq!(plan.fovs[0], 70.0);
+    assert!((plan.tiles[0].mats[0] - want).abs().max() < 1e-12);
+    assert_eq!(plan.tiles[0].fovs[0], 70.0);
 }
 
 /// Réglages de couleur : l'export concorde avec la formule de référence appliquée à l'export sans réglage.
@@ -785,4 +787,157 @@ fn the_stick_is_removed_from_360_exports_and_from_stitched_sources() {
     export(&stitched, &Calibration::default(), &plain, &out);
     let img = read_frames(&out, 480, 480, "rgb24", None, Some(6)).swap_remove(3);
     assert!(magenta_count(&img) > 3_500, "la perche de la source assemblée est visible sans traitement");
+}
+
+fn tile_view(proj: &str, yaw: f64, pitch: f64, fov: f64) -> TileView {
+    TileView { projection: proj.into(), view: View { yaw, pitch, roll: 0.0, fov, distortion: 0.0 }, keyframes: vec![] }
+}
+
+/// Plusieurs perspectives : chaque rectangle de la disposition montre la vue que la scène impose à cet endroit.
+#[test]
+fn several_views_share_one_video() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    let main = (25.0, -10.0, 0.0, 80.0);
+    let others = vec![
+        tile_view("flat", -100.0, 20.0, 100.0),
+        tile_view("fisheye", 160.0, 0.0, 180.0),
+        tile_view("planet", 0.0, -90.0, 250.0),
+    ];
+    let spec = |i: usize| -> (&str, (f64, f64, f64, f64)) {
+        if i == 0 {
+            ("flat", main)
+        } else {
+            let v = &others[i - 1];
+            (v.projection.as_str(), (v.view.yaw, v.view.pitch, 0.0, v.view.fov))
+        }
+    };
+    for (layout, gap) in [
+        (MultiLayout::Side, 0),
+        (MultiLayout::Stack, 0),
+        (MultiLayout::Pip, 0),
+        (MultiLayout::Trio, 0),
+        (MultiLayout::Quad, 0),
+        (MultiLayout::Quad, 8),
+    ] {
+        let s = fast(ExportSettings {
+            width: 640,
+            height: 360,
+            end: 1.0,
+            view: json!({"yaw": main.0, "pitch": main.1, "roll": main.2, "fov": main.3}),
+            multi: Multi { layout, gap, views: others.clone() },
+            ..Default::default()
+        });
+        let out = dir.path().join(format!("{layout:?}{gap}.mp4"));
+        export(&c, &Calibration::default(), &s, &out);
+        let frame = read_frames(&out, 640, 360, "rgb24", None, Some(8)).swap_remove(4);
+        for (i, r) in layout_rects(layout, 640, 360, gap).iter().enumerate() {
+            let (proj, view) = spec(i);
+            let (w, h) = (r.w as usize, r.h as usize);
+            // l'incrustation recouvre un coin de la vue principale : on ne compare que le quart supérieur gauche
+            let (cw, ch) = if layout == MultiLayout::Pip && i == 0 { (w / 2, h / 2) } else { (w, h) };
+            let got = crop_rgb(&frame, 640, (r.x as usize, r.y as usize, cw, ch));
+            let err = |v: (f64, f64, f64, f64)| {
+                let want = expected_view(TEX(), proj, w, h, &Mat3::identity(), v);
+                let want = crop_rgb(&want, w, (0, 0, cw, ch));
+                mean_abs_diff(&downscale_rgb(&got, cw, ch, 4).0, &downscale_rgb(&want, cw, ch, 4).0)
+            };
+            let good = err(view);
+            let shifted = err((view.0 + 25.0, view.1, view.2, view.3));
+            assert!(good < 10.0, "{layout:?} (écart {gap}) vue {} : écart {good:.2} avec la scène attendue", i + 1);
+            assert!(
+                shifted > 1.5 * good,
+                "{layout:?} vue {} : {good:.2} contre {shifted:.2} décalée (test non discriminant)",
+                i + 1
+            );
+        }
+        if gap > 0 {
+            // les écarts entre les vues sont noirs
+            for (x, y) in [(320, 90), (320, 270), (160, 180), (480, 180)] {
+                let px = avg_rgb(&frame, 640, x, y, 1);
+                assert!(near(px, [0.0, 0.0, 0.0], 14.0), "écart noir en ({x}, {y}) : {px:?}");
+            }
+        }
+    }
+}
+
+/// Chaque vue a ses propres keyframes ; l'image de sortie suit celles de chaque rectangle.
+#[test]
+fn each_view_follows_its_own_keyframes() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    let kf = |t: f64, yaw: f64, fov: f64| Keyframe {
+        t,
+        yaw: Some(yaw),
+        pitch: Some(0.0),
+        roll: Some(0.0),
+        fov: Some(fov),
+        ..Default::default()
+    };
+    let s = fast(ExportSettings {
+        width: 640,
+        height: 360,
+        end: 1.0,
+        keyframes: vec![kf(0.0, 25.0, 80.0), kf(1.0, -60.0, 80.0)],
+        multi: Multi {
+            layout: MultiLayout::Side,
+            gap: 0,
+            views: vec![TileView {
+                keyframes: vec![kf(0.0, 0.0, 70.0), kf(1.0, 90.0, 110.0)],
+                ..tile_view("flat", 0.0, 0.0, 90.0)
+            }],
+        },
+        ..Default::default()
+    });
+    let out = dir.path().join("kf.mp4");
+    export(&c, &Calibration::default(), &s, &out);
+    let frames = read_frames(&out, 640, 360, "rgb24", None, None);
+    assert_eq!(frames.len(), 30);
+    let smooth = |x: f64| x * x * (3.0 - 2.0 * x);
+    for k in [0usize, 15, 29] {
+        let u = smooth(k as f64 / 30.0);
+        let want = [(25.0 + (-85.0) * u, 80.0), (90.0 * u, 70.0 + 40.0 * u)];
+        for (i, (yaw, fov)) in want.iter().enumerate() {
+            let (x, w) = (i * 320, 320usize);
+            let got = crop_rgb(&frames[k], 640, (x, 0, w, 360));
+            let exp = expected_view(TEX(), "flat", w, 360, &Mat3::identity(), (*yaw, 0.0, 0.0, *fov));
+            let err = mean_abs_diff(&downscale_rgb(&got, w, 360, 4).0, &downscale_rgb(&exp, w, 360, 4).0);
+            assert!(err < 10.0, "image {k}, vue {} : écart {err:.2} (cap {yaw:.1}°, champ {fov:.1}°)", i + 1);
+        }
+    }
+    // les deux vues bougent : l'image du milieu diffère de celle du début dans chaque moitié
+    for i in 0..2 {
+        let (a, b) =
+            (crop_rgb(&frames[0], 640, (i * 320, 0, 320, 360)), crop_rgb(&frames[29], 640, (i * 320, 0, 320, 360)));
+        assert!(mean_abs_diff(&a, &b) > 15.0, "vue {} immobile", i + 1);
+    }
+}
+
+/// Dispositions : tailles trop petites, valeurs inconnues et écart invalide sont refusés avant tout rendu.
+#[test]
+fn invalid_layouts_are_refused_up_front() {
+    let c = static_clip();
+    let src = probe_source(&c.path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let base = ExportSettings {
+        width: 128,
+        height: 72,
+        multi: Multi { layout: MultiLayout::Quad, ..Default::default() },
+        ..Default::default()
+    };
+    let e = build_plan(&src, &Calibration::default(), &base, &dir.path().join("a.mp4"), None).err().unwrap();
+    assert!(is_user_error(&e) && e.to_string().contains("trop petite"), "{e}");
+    let bad_gap = ExportSettings {
+        multi: Multi { layout: MultiLayout::Side, gap: 6, ..Default::default() },
+        ..Default::default()
+    };
+    assert!(build_plan(&src, &Calibration::default(), &bad_gap, &dir.path().join("b.mp4"), None).is_err());
+    // l'export 360° ignore la disposition : une seule image équirectangulaire
+    let s = ExportSettings {
+        mode: "equirect".into(),
+        multi: Multi { layout: MultiLayout::Quad, ..Default::default() },
+        ..Default::default()
+    };
+    let plan = build_plan(&src, &Calibration::default(), &s, &dir.path().join("c.mp4"), None).unwrap();
+    assert_eq!(plan.tiles.len(), 1);
 }

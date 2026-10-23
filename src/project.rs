@@ -9,6 +9,7 @@ use crate::error::{export_err, Result};
 use crate::geometry::{Keyframe, Mat3, View, Ypr};
 use crate::grade::Grade;
 use crate::media::{probe_source, Layout, Source};
+use crate::multi::Multi;
 use crate::pipeline::{default_fov, ExportSettings};
 use crate::stabilize::{self, calibration_key, Orientation, StabMode};
 use crate::stick::Stick;
@@ -57,6 +58,8 @@ pub struct State {
     pub grade: Grade,
     /// Perche à selfie / nadir.
     pub stick: Stick,
+    /// Plusieurs perspectives dans la même vidéo.
+    pub multi: Multi,
     /// Réglages d'export mémorisés (libres).
     pub export: Value,
 }
@@ -73,13 +76,14 @@ impl Default for State {
             orientation: Ypr::default(),
             grade: Grade::default(),
             stick: Stick::default(),
+            multi: Multi::default(),
             export: json!({}),
         }
     }
 }
 
 /// Clés de premier niveau acceptées par `update_state`.
-const STATE_KEYS: [&str; 10] = [
+const STATE_KEYS: [&str; 11] = [
     "calibration",
     "trim",
     "projection",
@@ -89,6 +93,7 @@ const STATE_KEYS: [&str; 10] = [
     "orientation",
     "grade",
     "stick",
+    "multi",
     "export",
 ];
 
@@ -241,6 +246,7 @@ impl Project {
         next.keyframes.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
         next.grade.validate()?;
         next.stick.validate()?;
+        next.multi.validate()?;
         let file = self.state_file();
         let tmp = file.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&next)?)?;
@@ -352,6 +358,7 @@ impl Project {
         d.insert("orientation".into(), serde_json::to_value(s.orientation)?);
         d.insert("grade".into(), serde_json::to_value(s.grade)?);
         d.insert("stick".into(), serde_json::to_value(&s.stick)?);
+        d.insert("multi".into(), serde_json::to_value(&s.multi)?);
         d.insert("start".into(), json!(s.trim.start));
         d.insert("end".into(), json!(s.trim.end));
         for extra in [Some(&s.export), overrides].into_iter().flatten() {
@@ -542,6 +549,9 @@ mod tests {
             json!({"grade": {"contrast": 9}}),
             json!({"stick": {"mode": "gomme"}}),
             json!({"stick": {"radius": 99}}),
+            json!({"multi": {"layout": "mosaique"}}),
+            json!({"multi": {"gap": 6}}),
+            json!({"multi": {"views": [{"projection": "cube"}]}}),
             json!({"grade": {"saturation": "vive"}}),
         ] {
             let e = p.update_state(&bad).unwrap_err();

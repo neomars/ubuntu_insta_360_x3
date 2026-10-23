@@ -568,4 +568,122 @@ describe('interface X3 Studio Local', () => {
       assert.equal((await stick()).mode, 'off');
     });
   });
+
+  it("plusieurs perspectives : disposition, choix de la vue, keyframes par vue, aperçu identique à l'export", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('vues'));
+      await page.click('.tab[data-tab=views]');
+      const multi = () => page.evaluate('window.__x3.S.st.multi');
+      const redraw = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.equal((await multi()).layout, 'single');
+      assert.ok(await page.locator('#tile-outline').isHidden(), 'une seule vue : pas de cadre de sélection');
+      assert.equal(await page.locator('#tile-list li').count(), 1);
+      // la vue 1 : un cap connu, sans keyframe
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 25, pitch: -10, roll: 0, fov: 80, distortion: 0 }; S.st.keyframes = [];
+        S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(0.8); S.dirty = true;
+      });
+      const parity = async (label) => {
+        await settle(page); await sleep(500);
+        const { diff } = await previewVsExport(page);
+        assert.ok(diff < 0.045, `${label} : l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      };
+      // dispositions : le nombre de vues, leurs rectangles (comme le calcul de référence de Rust) et la parité avec l'export
+      const rectsOf = (layout, w, h, gap) => page.evaluate(async ([layout, w, h, gap]) => {
+        const m = await import('/geometry.js'); return m.layoutRects(layout, w, h, gap);
+      }, [layout, w, h, gap]);
+      assert.deepEqual(await rectsOf('pip', 1920, 1080, 0), [{ x: 0, y: 0, w: 1920, h: 1080 }, { x: 1286, y: 724, w: 576, h: 324 }]);
+      assert.deepEqual((await rectsOf('quad', 1920, 1080, 8))[3], { x: 964, y: 544, w: 956, h: 536 });
+      assert.deepEqual((await rectsOf('trio', 1920, 1080, 0))[1], { x: 1280, y: 0, w: 640, h: 540 });
+      for (const [layout, count, gap] of [['side', 2, 0], ['stack', 2, 0], ['pip', 2, 0], ['trio', 3, 0], ['quad', 4, 0], ['quad', 4, 8]]) {
+        await page.selectOption('#m-layout', layout);
+        await page.evaluate((gap) => { const e = document.getElementById('m-gap'); e.value = gap; e.dispatchEvent(new Event('input', { bubbles: true })); }, gap);
+        const m = await multi();
+        assert.equal(m.layout, layout);
+        assert.equal(m.views.length, count - 1, `${layout} : les vues manquantes sont créées`);
+        assert.deepEqual(m.views.map((v) => v.view.yaw), Array.from({ length: count - 1 }, (_, j) => ((360 * (j + 1) / count + 180) % 360 + 360) % 360 - 180),
+          `${layout} : les vues non modifiées se répartissent sur le tour`);
+        assert.equal(await page.locator('#tile-list li').count(), count);
+        assert.ok(await page.locator('#tile-outline').isVisible(), `${layout} : cadre de la vue sélectionnée`);
+        assert.equal(await page.locator('#f-m-gap').isVisible(), layout !== 'pip', `${layout} : l'écart ne concerne pas l'incrustation`);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(`${layout}, écart ${gap}`);
+      }
+      // deuxième vue : on la choisit dans la liste, on l'oriente, on lui donne des keyframes (la vue 1 n'en a pas)
+      await page.selectOption('#m-layout', 'side');
+      await page.evaluate(() => { const e = document.getElementById('m-gap'); e.value = 0; e.dispatchEvent(new Event('input', { bubbles: true })); });
+      await page.click('#tile-list li:nth-child(2) button');
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1);
+      assert.match(await page.innerText('#views-active'), /vue 2 sur 2/);
+      await page.click('.tab[data-tab=reframe]');
+      assert.equal(await page.inputValue('#proj'), 'flat');
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: -90, pitch: 5, fov: 70 }))");
+      let m = await multi();
+      assert.deepEqual([m.views[0].view.yaw, m.views[0].view.pitch, m.views[0].view.fov], [-90, 5, 70]);
+      const s0 = await page.evaluate('window.__x3.S.st.view');
+      assert.deepEqual([s0.yaw, s0.pitch, s0.fov], [25, -10, 80], 'la vue 1 n\'a pas bougé');
+      await page.evaluate('window.__x3.seek(0.0)'); await settle(page);
+      await page.keyboard.press('k');
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: 0 }))");
+      await page.evaluate('window.__x3.seek(2.0)'); await settle(page);
+      await page.evaluate("window.__x3.editView((v) => ({ ...v, yaw: 120, fov: 100 }))");
+      await page.keyboard.press('k');
+      m = await multi();
+      assert.equal(m.views[0].keyframes.length, 2, 'les keyframes sont ceux de la vue 2');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0, '… et pas ceux de la vue 1');
+      assert.equal(await page.locator('.kf').count(), 2);
+      // projection propre à chaque vue
+      await page.selectOption('#proj', 'fisheye');
+      m = await multi();
+      assert.equal(m.views[0].projection, 'fisheye');
+      assert.equal(await page.evaluate('window.__x3.S.st.projection'), 'flat');
+      await page.selectOption('#proj', 'flat');
+      // revenir à la vue 1 en cliquant dessus dans l'aperçu
+      const box = await page.locator('#gl').boundingBox();
+      await page.mouse.click(box.x + box.width * 0.25, box.y + box.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 0, 'clic sur la moitié gauche : vue 1');
+      assert.equal(await page.locator('.kf').count(), 0, 'les keyframes affichés sont ceux de la vue 1');
+      await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * 0.5);
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 1);
+      assert.equal(await page.locator('.kf').count(), 2);
+      // glisser dans la vue 2 ne déplace que la vue 2
+      const before = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes.map(k => k.yaw)');
+      await page.evaluate('window.__x3.seek(0.0)'); await settle(page);
+      await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.5); await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.75 - 60, box.y + box.height * 0.5, { steps: 3 }); await page.mouse.up();
+      const after = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes.map(k => k.yaw)');
+      assert.ok(after[0] > before[0] + 1, `le glissé modifie le keyframe de la vue 2 (${before} -> ${after})`);
+      assert.equal(await page.evaluate('window.__x3.S.st.view.yaw'), 25, 'la vue 1 n\'a pas bougé');
+      // l'aperçu suit chaque vue (keyframes de la vue 2 à t = 0, 1 et 2 s) et reste identique à l'export
+      for (const t of [0.0, 1.0, 2.0]) {
+        await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, t);
+        await page.evaluate('window.__x3.flushSave()');
+        await parity(`vue 2 avec keyframes, t = ${t}`);
+      }
+      // enregistré sur disque
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.multi.layout, 'side');
+      assert.equal(saved.multi.views[0].keyframes.length, 2);
+      assert.equal(saved.keyframes.length, 0);
+      // le serveur refuse un écart qui n'est pas un multiple de 4
+      const refused = await page.evaluate(async () => {
+        try { await window.__x3.api('PUT', `/api/project/${window.__x3.S.proj.id}/state`, { multi: { gap: 6 } }); return 'accepté'; } catch (e) { return e.message; }
+      });
+      assert.match(refused, /multiple de 4/);
+      page.errors.length = 0; // le navigateur journalise ce refus voulu (400)
+      // retour à une seule vue : le panneau Recadrage retrouve la vue 1
+      await page.click('.tab[data-tab=views]');
+      await page.selectOption('#m-layout', 'single');
+      assert.equal(await page.evaluate('window.__x3.S.tile'), 0);
+      assert.ok(await page.locator('#tile-outline').isHidden());
+      await redraw();
+      await parity('retour à une seule vue');
+    });
+  });
 });

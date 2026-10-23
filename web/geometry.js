@@ -99,6 +99,47 @@ export function gradeColorIsNeutral(g) {
   return ['brightness', 'contrast', 'saturation', 'gamma', 'warmth', 'tint'].every((k) => g[k] === GRADE_DEFAULT[k]);
 }
 
+// Plusieurs perspectives : miroir de src/multi.rs (mêmes fractions, mêmes arrondis à l'entier pair).
+export const LAYOUT_TILES = { single: 1, side: 2, stack: 2, pip: 2, trio: 3, quad: 4 };
+const LAYOUT_FRACTIONS = {
+  single: [[0, 0, 1, 1]],
+  side: [[0, 0, 0.5, 1], [0.5, 0, 1, 1]],
+  stack: [[0, 0, 1, 0.5], [0, 0.5, 1, 1]],
+  pip: [[0, 0, 1, 1], [0.67, 0.67, 0.97, 0.97]],
+  trio: [[0, 0, 2 / 3, 1], [2 / 3, 0, 1, 0.5], [2 / 3, 0.5, 1, 1]],
+  quad: [[0, 0, 0.5, 0.5], [0.5, 0, 1, 0.5], [0, 0.5, 0.5, 1], [0.5, 0.5, 1, 1]],
+};
+const evenPx = (v) => Math.max(0, Math.round(v / 2) * 2);
+
+// Rectangles {x, y, w, h} des vues d'une image w x h ; `gap` (multiple de 4) est pris sur les bords communs.
+export function layoutRects(layout, w, h, gap = 0) {
+  const inset = layout === 'pip' ? 0 : gap / 2;
+  return (LAYOUT_FRACTIONS[layout] || LAYOUT_FRACTIONS.single).map((f) => {
+    let x0 = evenPx(f[0] * w), x1 = evenPx(f[2] * w), y0 = evenPx(f[1] * h), y1 = evenPx(f[3] * h);
+    if (f[0] > 0) x0 += inset;
+    if (f[2] < 1) x1 -= inset;
+    if (f[1] > 0) y0 += inset;
+    if (f[3] < 1) y1 -= inset;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  });
+}
+
+export const MULTI_DEFAULT = { layout: 'single', gap: 0, views: [] };
+
+// Vue par défaut de la vue n° `index` (1 = la deuxième) d'une disposition de `count` vues (miroir de Multi::default_tile).
+export function defaultTileView(index, count) {
+  return { projection: 'flat', view: { yaw: wrap180(360 * index / Math.max(1, count)), pitch: 0, roll: 0, fov: 90, distortion: 0 }, keyframes: [] };
+}
+
+// Réglages « multi » complétés : toutes les vues de la disposition existent.
+export function multiWithDefaults(m) {
+  const out = Object.assign({}, MULTI_DEFAULT, m || {});
+  out.views = (out.views || []).map((v) => Object.assign(defaultTileView(1, 2), v, { view: Object.assign({ yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 }, v.view || {}), keyframes: v.keyframes || [] }));
+  const n = LAYOUT_TILES[out.layout] || 1;
+  for (let i = out.views.length + 1; i < n; i++) out.views.push(defaultTileView(i, n));
+  return out;
+}
+
 // Perche à selfie / nadir : miroir de src/stick.rs.
 export const STICK_DEFAULT = { mode: 'off', radius: 20, softness: 0.3, yaw: 0, pitch: -90, color: '#202020' };
 export const STICK_MODES = { off: 0, mirror: 1, cover: 2 };
@@ -118,6 +159,18 @@ export function stickUniforms(st) {
   const hex = /^#[0-9a-fA-F]{6}$/.test(st.color) ? st.color : STICK_DEFAULT.color;
   const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
   return { axis, perp: c.map((v) => v / n), mode: STICK_MODES[st.mode] ?? 0, rho, rhoIn: rho * (1 - soft), rgb };
+}
+
+// Réglages d'image appliqués à une couleur RVB 0..1 (miroir du shader) : le fond des écarts entre les vues.
+export function gradeColor(g, rgb) {
+  const [r, gr, b] = rgb;
+  let y = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+  let cb = (b - y) / 1.8556, cr = (r - y) / 1.5748;
+  const [sb, sr] = gradeChromaShift(g);
+  y = Math.min(1, Math.max(0, (Math.pow(Math.min(1, Math.max(0, y)), 1 / g.gamma) - 0.5) * g.contrast + 0.5 + g.brightness));
+  cb = Math.min(0.5, Math.max(-0.5, cb * g.saturation + sb));
+  cr = Math.min(0.5, Math.max(-0.5, cr * g.saturation + sr));
+  return [y + 1.5748 * cr, y - 0.187324 * cb - 0.468124 * cr, y + 1.8556 * cb].map((v) => Math.min(1, Math.max(0, v)));
 }
 
 export function fmtTime(t) {

@@ -22,6 +22,7 @@
   <section class="stage">
     <div class="viewer-wrap">
       <canvas id="gl" aria-label="Aperçu 360°"></canvas>
+      <div id="tile-outline" class="tile-outline" hidden></div>
       <video id="video" class="vhid" playsinline preload="auto"></video>
       <div id="overlay-msg" class="overlay-msg" hidden></div>
       <div class="hud hud-tl">
@@ -58,6 +59,7 @@
   <aside class="panel">
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="reframe" role="tab">Recadrage</button>
+      <button class="tab" data-tab="views" role="tab">Vues</button>
       <button class="tab" data-tab="image" role="tab">Image</button>
       <button class="tab" data-tab="stick" role="tab">Perche</button>
       <button class="tab" data-tab="stab" role="tab">Stabilisation</button>
@@ -67,7 +69,7 @@
     </nav>
 
     <section class="pane active" id="pane-reframe">
-      <h3>Vue actuelle</h3>
+      <h3>Vue actuelle <small id="views-active"></small></h3>
       <div class="field"><label for="v-yaw">Cap (lacet)</label><input id="v-yaw" type="range" min="-180" max="180" step="0.5"><output id="o-yaw"></output></div>
       <div class="field"><label for="v-pitch">Inclinaison</label><input id="v-pitch" type="range" min="-90" max="90" step="0.5"><output id="o-pitch"></output></div>
       <div class="field"><label for="v-roll">Roulis</label><input id="v-roll" type="range" min="-180" max="180" step="0.5"><output id="o-roll"></output></div>
@@ -85,6 +87,23 @@
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>
       <p id="kf-empty" class="hint">Aucun keyframe.</p>
+    </section>
+
+    <section class="pane" id="pane-views">
+      <h3>Plusieurs perspectives</h3>
+      <div class="field"><label for="m-layout">Disposition</label>
+        <select id="m-layout">
+          <option value="single">Une seule vue</option>
+          <option value="side">Deux vues côte à côte</option>
+          <option value="stack">Deux vues, l'une au-dessus de l'autre</option>
+          <option value="pip">Incrustation (vue dans la vue)</option>
+          <option value="trio">Une grande vue et deux petites</option>
+          <option value="quad">Quatre vues (2 × 2)</option>
+        </select></div>
+      <div class="field" id="f-m-gap" hidden><label for="m-gap">Écart entre les vues <small>noir, en pixels de l'image</small></label><input id="m-gap" type="range" min="0" max="40" step="4"><output></output></div>
+      <h3>Vues</h3>
+      <ul id="tile-list" class="kf-list"></ul>
+      <p class="hint">Chaque vue a sa projection, sa caméra et ses keyframes. Choisissez une vue ici (ou cliquez dessus dans l'aperçu), puis réglez-la dans l'onglet <b>Recadrage</b>. La vue 1 est celle du projet ; les autres se répartissent d'abord sur le tour de l'horizon. La stabilisation, les réglages d'image et la perche s'appliquent à toutes.</p>
     </section>
 
     <section class="pane" id="pane-image">

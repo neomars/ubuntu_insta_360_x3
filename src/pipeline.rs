@@ -10,6 +10,7 @@ use crate::error::{export_err, media_err, Cancelled, Result};
 use crate::geometry::{interpolate_view, Keyframe, Mat3, View, Ypr};
 use crate::grade::Grade;
 use crate::media::{Layout, Source};
+use crate::multi::{layout_rects, Multi, MultiLayout, Rect, MIN_TILE_SIDE};
 pub use crate::render::MAX_DISTORTION;
 use crate::render::{perspective_limit, LensRenderer, Projection, SourceKind};
 use crate::stick::Stick;
@@ -61,6 +62,8 @@ pub struct ExportSettings {
     pub grade: Grade,
     /// Perche à selfie / nadir : zone de la caméra à masquer.
     pub stick: Stick,
+    /// Plusieurs perspectives dans la même vidéo (mode `reframe`) : disposition et vues supplémentaires.
+    pub multi: Multi,
 }
 
 impl Default for ExportSettings {
@@ -85,6 +88,7 @@ impl Default for ExportSettings {
             spherical_metadata: true,
             grade: Grade::default(),
             stick: Stick::default(),
+            multi: Multi::default(),
         }
     }
 }
@@ -167,6 +171,7 @@ impl ExportSettings {
         }
         self.grade.validate()?;
         self.stick.validate()?;
+        self.multi.validate()?;
         Ok(())
     }
 }
@@ -175,6 +180,16 @@ impl ExportSettings {
 pub enum PlanKind {
     Video,
     Image,
+}
+
+/// Une vue de l'image de sortie : son rectangle, son moteur de rendu à sa taille, et pour chaque image à rendre une
+/// matrice de vue, un champ de vision et une distorsion.
+pub struct TilePlan {
+    pub rect: Rect,
+    pub renderer: LensRenderer,
+    pub mats: Vec<Mat3>,
+    pub fovs: Vec<f64>,
+    pub dists: Vec<f64>,
 }
 
 /// Tout ce qu'il faut pour exécuter un export (ou une capture).
@@ -187,11 +202,10 @@ pub struct Plan {
     pub decoder: Vec<String>,
     /// FFmpeg encodeur : stdin = images I420 brutes de la taille de sortie.
     pub encoder: Vec<String>,
-    pub renderer: LensRenderer,
-    /// Une matrice de vue, un champ de vision et une distorsion par image à rendre.
-    pub mats: Vec<Mat3>,
-    pub fovs: Vec<f64>,
-    pub dists: Vec<f64>,
+    /// Taille de l'image de sortie.
+    pub out_size: (u32, u32),
+    /// Les vues, dans l'ordre de dessin (la première est celle du projet ; une incrustation vient après).
+    pub tiles: Vec<TilePlan>,
     /// Injecter les métadonnées sphériques après l'encodage.
     pub spherical: bool,
     /// Correction de couleur appliquée à chaque image rendue.
@@ -213,6 +227,11 @@ fn shell_line(cmd: &[String]) -> String {
 }
 
 impl Plan {
+    /// Nombre d'images à rendre.
+    pub fn frames(&self) -> usize {
+        self.tiles.iter().map(|t| t.mats.len().min(t.fovs.len()).min(t.dists.len())).min().unwrap_or(0)
+    }
+
     /// Ligne de commande lisible (pour `--dry-run`).
     pub fn shell(&self) -> String {
         format!("{}  |  <rendu x3studio>  |  {}", shell_line(&self.decoder), shell_line(&self.encoder))
@@ -437,11 +456,56 @@ fn source_kind(src: &Source) -> SourceKind {
     }
 }
 
-fn make_renderer(src: &Source, calib: &Calibration, s: &ExportSettings) -> Result<LensRenderer> {
-    let (ow, oh) = output_size(src, s);
-    let proj = if s.mode == "reframe" { s.projection.parse::<Projection>()? } else { Projection::Equirect };
+/// Moteur de rendu d'une vue de `ow x oh` pixels et de projection `projection` (ignorée hors du mode `reframe`).
+fn make_renderer(
+    src: &Source,
+    calib: &Calibration,
+    s: &ExportSettings,
+    projection: &str,
+    (ow, oh): (u32, u32),
+) -> Result<LensRenderer> {
+    let proj = if s.mode == "reframe" { projection.parse::<Projection>()? } else { Projection::Equirect };
     let div = if u64::from(ow) * u64::from(oh) <= 4_200_000 { 4 } else { 8 };
     Ok(LensRenderer::new(calib, source_kind(src), ow, oh, proj, div)?.with_stick(&s.stick))
+}
+
+/// Les vues de l'export, une par rectangle de la disposition (une seule hors du mode `reframe`), avec les
+/// paramètres de chacune aux instants `times_abs`.
+fn build_tiles(
+    src: &Source,
+    calib: &Calibration,
+    s: &ExportSettings,
+    times_abs: &[f64],
+    stab: Option<&[Mat3]>,
+) -> Result<Vec<TilePlan>> {
+    let (ow, oh) = output_size(src, s);
+    let layout = if s.mode == "reframe" { s.multi.layout } else { MultiLayout::Single };
+    let rects = layout_rects(layout, ow, oh, s.multi.gap);
+    if rects.len() > 1 && rects.iter().any(|r| r.w < MIN_TILE_SIDE || r.h < MIN_TILE_SIDE) {
+        return Err(export_err(
+            "L'image est trop petite pour cette disposition : agrandissez-la ou réduisez l'écart entre les vues.",
+        ));
+    }
+    rects
+        .into_iter()
+        .enumerate()
+        .map(|(i, rect)| {
+            let tile_settings = if i == 0 {
+                s.clone()
+            } else {
+                let tv = s.multi.tile(i);
+                ExportSettings {
+                    projection: tv.projection,
+                    view: serde_json::to_value(tv.view)?,
+                    keyframes: tv.keyframes,
+                    ..s.clone()
+                }
+            };
+            let (mats, fovs, dists) = view_params_ex(src, &tile_settings, times_abs, stab);
+            let renderer = make_renderer(src, calib, &tile_settings, &tile_settings.projection, (rect.w, rect.h))?;
+            Ok(TilePlan { rect, renderer, mats, fovs, dists })
+        })
+        .collect()
 }
 
 fn base_command(overwrite: bool) -> Vec<String> {
@@ -468,10 +532,9 @@ pub fn build_plan(
     let speed = s.speed.clamp(0.05, 100.0);
     let n_proc = ((dur * pfps).round_ties_even() as usize).max(1);
     let times: Vec<f64> = (0..n_proc).map(|i| start + i as f64 / pfps).collect();
-    let (mats, fovs, dists) = view_params_ex(src, s, &times, stab);
+    let tiles = build_tiles(src, calib, s, &times, stab)?;
     let out_dur = dur / speed;
     let spherical = s.mode == "equirect" && s.spherical_metadata;
-    let renderer = make_renderer(src, calib, s)?;
     let (ow, oh) = output_size(src, s);
 
     let mut pre = if (pfps - src.fps).abs() > 0.01 { format!("fps={pfps:.5},") } else { String::new() };
@@ -535,10 +598,8 @@ pub fn build_plan(
         out_duration: out_dur,
         decoder,
         encoder,
-        renderer,
-        mats,
-        fovs,
-        dists,
+        out_size: (ow, oh),
+        tiles,
         spherical,
         grade: s.grade,
     })
@@ -574,8 +635,7 @@ pub fn build_snapshot_plan(
     let t = t.clamp(0.0, (src.duration - 1.0 / src.fps.max(1.0)).max(0.0));
     let end = src.duration.min(t + 1.0);
     let s2 = ExportSettings { start: t, end, speed: 1.0, ..s.clone() };
-    let (mats, fovs, dists) = view_params_ex(src, &s2, &[t], stab);
-    let renderer = make_renderer(src, calib, &s2)?;
+    let tiles = build_tiles(src, calib, &s2, &[t], stab)?;
     let (ow, oh) = output_size(src, &s2);
 
     let mut decoder = base_command(false);
@@ -614,10 +674,8 @@ pub fn build_snapshot_plan(
         out_duration: 1.0,
         decoder,
         encoder,
-        renderer,
-        mats,
-        fovs,
-        dists,
+        out_size: (ow, oh),
+        tiles,
         spherical: false,
         grade: s.grade,
     })
@@ -875,17 +933,46 @@ pub fn run_ffmpeg(cmd: &[String], total_seconds: f64, on_progress: &dyn Fn(f64),
     Ok(())
 }
 
+/// Image I420 `w x h` toute noire (luminance 16, chrominance 128) : le fond des écarts entre les vues.
+fn black_frame(w: usize, h: usize) -> Vec<u8> {
+    let mut f = vec![128u8; w * h * 3 / 2];
+    f[..w * h].fill(16);
+    f
+}
+
+/// Copie l'image I420 `src` (de la taille de `rect`, valeurs paires) à la position de `rect` dans `dst` (`dw x dh`).
+fn blit_i420(src: &[u8], rect: Rect, dst: &mut [u8], dw: usize, dh: usize) {
+    let (x, y, w, h) = (rect.x as usize, rect.y as usize, rect.w as usize, rect.h as usize);
+    for r in 0..h {
+        dst[(y + r) * dw + x..][..w].copy_from_slice(&src[r * w..][..w]);
+    }
+    let (cw, ch, dcw) = (w / 2, h / 2, dw / 2);
+    for plane in 0..2 {
+        let (s0, d0) = (w * h + plane * (w * h / 4), dw * dh + plane * (dw * dh / 4));
+        for r in 0..ch {
+            dst[d0 + (y / 2 + r) * dcw + x / 2..][..cw].copy_from_slice(&src[s0 + r * cw..][..cw]);
+        }
+    }
+}
+
 /// Nombre d'images lues d'avance / rendues en attente d'écriture.
 const PIPELINE_DEPTH: usize = 4;
 
 /// Décodeur → rendu → encodeur. Les trois étapes s'exécutent en parallèle (lecture et écriture dans
 /// leurs propres threads, rendu parallélisé par `rayon`).
 fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &AtomicBool) -> Result<()> {
-    let n = plan.mats.len().min(plan.fovs.len());
-    if n == 0 {
+    let n = plan.frames();
+    if n == 0 || plan.tiles.is_empty() {
         return Err(export_err("Aucune image à produire."));
     }
-    let (n_in, n_out) = (plan.renderer.frame_bytes_in(), plan.renderer.frame_bytes_out());
+    let (ow, oh) = (plan.out_size.0 as usize, plan.out_size.1 as usize);
+    let n_in = plan.tiles[0].renderer.frame_bytes_in();
+    // plusieurs vues : chacune est rendue dans son propre tampon puis copiée dans l'image de sortie
+    let mut tile_frames: Vec<Vec<u8>> = if plan.tiles.len() > 1 {
+        plan.tiles.iter().map(|t| vec![0u8; t.renderer.frame_bytes_out()]).collect()
+    } else {
+        vec![]
+    };
     let mut dec = Proc::spawn(&plan.decoder, Stdio::null(), Stdio::piped())?;
     let mut enc = Proc::spawn(&plan.encoder, Stdio::piped(), Stdio::null())?;
     let mut dec_out = dec.child.stdout.take().ok_or_else(|| export_err("Sortie du décodeur indisponible."))?;
@@ -925,10 +1012,16 @@ fn render_stream(plan: &Plan, on_progress: &(dyn Fn(f64) + Sync), cancel: &Atomi
                     Err(RecvTimeoutError::Disconnected) => break 'frames,
                 }
             };
-            let mut out = out_free_rx.try_recv().unwrap_or_else(|_| vec![0u8; n_out]);
-            plan.renderer.render_with(&frame, &plan.mats[done], plan.fovs[done], plan.dists[done], &mut out);
-            let (ow, oh) = plan.renderer.out_size();
-            plan.grade.apply_i420(&mut out, ow as usize, oh as usize);
+            let mut out = out_free_rx.try_recv().unwrap_or_else(|_| black_frame(ow, oh));
+            if let [only] = &plan.tiles[..] {
+                only.renderer.render_with(&frame, &only.mats[done], only.fovs[done], only.dists[done], &mut out);
+            } else {
+                for (tile, buf) in plan.tiles.iter().zip(tile_frames.iter_mut()) {
+                    tile.renderer.render_with(&frame, &tile.mats[done], tile.fovs[done], tile.dists[done], buf);
+                    blit_i420(buf, tile.rect, &mut out, ow, oh);
+                }
+            }
+            plan.grade.apply_i420(&mut out, ow, oh);
             let _ = free_tx.send(frame);
             if out_tx.send(out).is_err() {
                 break; // le thread d'écriture s'est arrêté : l'encodeur est mort
@@ -1218,9 +1311,9 @@ mod tests {
         let calib = Calibration::default();
         let s = ExportSettings { width: 640, height: 360, start: 1.0, end: 3.0, crf: 23, ..Default::default() };
         let plan = build_plan(&src, &calib, &s, Path::new("/tmp/sortie vidéo.mp4"), None).unwrap();
-        assert_eq!((plan.kind, plan.mats.len(), plan.fovs.len(), plan.spherical), (PlanKind::Video, 60, 60, false));
+        assert_eq!((plan.kind, plan.frames(), plan.tiles.len(), plan.spherical), (PlanKind::Video, 60, 1, false));
         assert!((plan.out_duration - 2.0).abs() < 1e-9);
-        assert_eq!(plan.renderer.out_size(), (640, 360));
+        assert_eq!((plan.out_size, plan.tiles[0].renderer.out_size()), ((640, 360), (640, 360)));
         let dec = &plan.decoder;
         assert_eq!(dec[0], "ffmpeg");
         assert_eq!(
@@ -1252,7 +1345,7 @@ mod tests {
         // vitesse x2 et cadence de sortie plus basse : moins d'images traitées, setpts + atempo
         let fast = ExportSettings { speed: 2.0, fps: 10.0, start: 0.0, end: 0.0, ..s.clone() };
         let plan = build_plan(&src, &calib, &fast, Path::new("o.mp4"), None).unwrap();
-        assert_eq!(plan.mats.len(), 200, "10 s traitées à 20 i/s");
+        assert_eq!(plan.frames(), 200, "10 s traitées à 20 i/s");
         assert!(arg_after(&plan.decoder, "-filter_complex").unwrap().starts_with("[0:v:0]fps=20.00000,format=yuv420p"));
         assert_eq!(
             arg_after(&plan.encoder, "-filter_complex"),
@@ -1288,8 +1381,8 @@ mod tests {
         let eq = ExportSettings { mode: "equirect".into(), stitch_width: 1024, ..Default::default() };
         let p = build_plan(&x3(4.0, 30.0), &calib, &eq, Path::new("o.mp4"), None).unwrap();
         assert!(p.spherical && !p.encoder.iter().any(|a| a == "+faststart"));
-        assert_eq!(p.renderer.out_size(), (1024, 512));
-        assert!(p.fovs.iter().all(|&f| f == 0.0));
+        assert_eq!(p.tiles[0].renderer.out_size(), (1024, 512));
+        assert!(p.tiles[0].fovs.iter().all(|&f| f == 0.0));
         let p = build_plan(
             &x3(4.0, 30.0),
             &calib,
@@ -1318,7 +1411,7 @@ mod tests {
         let calib = Calibration::default();
         let s = ExportSettings { width: 320, height: 180, ..Default::default() };
         let jpg = build_snapshot_plan(&src, &calib, &s, 99.0, Path::new("/tmp/c.JPG"), None).unwrap();
-        assert_eq!((jpg.kind, jpg.mats.len()), (PlanKind::Image, 1));
+        assert_eq!((jpg.kind, jpg.frames()), (PlanKind::Image, 1));
         assert_eq!(
             arg_after(&jpg.decoder, "-ss"),
             Some("9.9500"),
@@ -1344,7 +1437,7 @@ mod tests {
         // l'instant sert aussi à choisir les keyframes et la stabilisation
         let kf = ExportSettings { keyframes: vec![Keyframe { t: 5.0, yaw: Some(33.0), ..Default::default() }], ..s };
         let p = build_snapshot_plan(&src, &calib, &kf, 2.0, Path::new("c.jpg"), None).unwrap();
-        assert!(close(&p.mats[0], &crate::geometry::ypr_to_matrix(33.0, 0.0, 0.0)));
+        assert!(close(&p.tiles[0].mats[0], &crate::geometry::ypr_to_matrix(33.0, 0.0, 0.0)));
     }
 
     #[test]

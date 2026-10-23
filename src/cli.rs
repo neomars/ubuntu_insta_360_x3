@@ -9,6 +9,7 @@ use crate::error::{export_err, is_cancelled, is_user_error, Result};
 use crate::geometry::{Keyframe, Mat3, Ypr};
 use crate::grade::Grade;
 use crate::media::{probe_source, Layout};
+use crate::multi::{Multi, MultiLayout, TileView};
 use crate::pipeline::{self, default_fov, ExportSettings};
 use crate::project::{Project, StabOverride};
 use crate::stabilize::StabMode;
@@ -192,6 +193,17 @@ struct ViewArgs {
     /// Distorsion de la perspective plate, de 0 (rectiligne) à 2 ; 1 = petite planète
     #[arg(long, default_value_t = 0.0)]
     distortion: f64,
+    /// Plusieurs vues dans la même vidéo : `side` (côte à côte), `stack` (haut/bas), `pip` (incrustation), `trio`
+    /// (une grande, deux petites) ou `quad` (2 x 2). La vue 1 est celle des options ci-dessus
+    #[arg(long, default_value = "single", value_parser = ["single", "side", "stack", "pip", "trio", "quad"])]
+    layout: String,
+    /// Écart entre les vues (px, multiple de 4, 0 à 40)
+    #[arg(long, default_value_t = 0)]
+    layout_gap: u32,
+    /// Fichier JSON des vues 2, 3… : [{projection, view: {yaw, pitch, roll, fov, distortion}, keyframes: [...]}, ...].
+    /// Par défaut, les vues sont réparties sur le tour (côte à côte : avant et arrière)
+    #[arg(long)]
+    views: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -388,7 +400,20 @@ fn view_settings(base: ExportSettings, v: &ViewArgs) -> Result<ExportSettings> {
         return Err(export_err("La distorsion ne s'applique qu'à la projection plate (--projection flat)."));
     }
     let fov = if v.fov != 0.0 { v.fov } else { default_fov(&v.projection) };
+    let multi = Multi {
+        layout: serde_json::from_value(json!(v.layout)).unwrap_or(MultiLayout::Single),
+        gap: v.layout_gap,
+        views: match &v.views {
+            Some(file) => serde_json::from_str::<Vec<TileView>>(
+                &std::fs::read_to_string(file)
+                    .map_err(|e| export_err(format!("Vues illisibles ({}) : {e}", file.display())))?,
+            )
+            .map_err(|e| export_err(format!("Vues invalides ({}) : {e}", file.display())))?,
+            None => vec![],
+        },
+    };
     Ok(ExportSettings {
+        multi,
         mode: "reframe".into(),
         projection: v.projection.clone(),
         width: v.size.0,

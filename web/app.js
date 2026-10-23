@@ -1,5 +1,5 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
-import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, mul3, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
+import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, LAYOUT_TILES, defaultTileView, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, layoutRects, mul3, multiWithDefaults, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
@@ -30,6 +30,8 @@ function toast(msg, err = false, ms = 5000) {
 // ---------------------------------------------------------------- état
 const S = {
   proj: null, st: null, t: 0, dur: 0, fps: 30,
+  tile: 0,                   // vue en cours de modification (0 = la vue du projet, 1… = les vues supplémentaires)
+  listAt: 0,                 // dernier rafraîchissement de la liste des vues (ms)
   override: null,            // vue modifiée à la main, pas encore enregistrée
   stab: { arr: IDENTITY, n: 1 },
   selKf: -1, dirty: true, lastT: -1, info: null, jobs: [], saveTimer: null, pending: new Set(),
@@ -57,11 +59,22 @@ async function flushSave() {
 }
 
 // ---------------------------------------------------------------- vue courante
-function projection() { return S.st ? S.st.projection : 'flat'; }
-function baseView() { return S.st.view; }
+// Plusieurs perspectives : la vue 0 est celle du projet (`projection`, `view`, `keyframes` de l'état) ; les suivantes sont
+// dans `multi.views` avec les mêmes champs. Tout le panneau « Recadrage » agit sur la vue sélectionnée (`S.tile`).
+function tileCount() { return S.st ? LAYOUT_TILES[S.st.multi.layout] || 1 : 1; }
+function tileData(i = S.tile) { return i === 0 || !S.st ? S.st : S.st.multi.views[i - 1] || S.st; }
+function saveTile(...fields) { if (S.tile === 0) scheduleSave(...fields); else scheduleSave('multi'); }
+function projection() { return S.st ? tileData().projection : 'flat'; }
+function baseView() { return tileData().view; }
 function currentView(t) {
   if (S.override) return S.override;
-  return interpolateView(S.st.keyframes, t, baseView());
+  return interpolateView(tileData().keyframes, t, baseView());
+}
+// Vue de la vue n° `i` à l'instant `t` (la vue en cours de modification peut être modifiée à la main, sans keyframe).
+function tileViewAt(i, t) {
+  if (i === S.tile && S.override) return S.override;
+  const d = tileData(i);
+  return interpolateView(d.keyframes, t, d.view);
 }
 function clampView(v) {
   v.distortion = projection() === 'flat' ? Math.min(MAX_DISTORTION, Math.max(0, v.distortion || 0)) : 0;
@@ -75,12 +88,12 @@ function clampView(v) {
 function editView(patchFn) {
   if (!S.st) return;
   const t = S.t, v = clampView(patchFn({ ...currentView(t) }));
-  const kfs = S.st.keyframes;
+  const d = tileData(), kfs = d.keyframes;
   if (!kfs.length) {
-    S.st.view = v; S.override = null; scheduleSave('view');
+    d.view = v; S.override = null; saveTile('view');
   } else {
     const i = kfs.findIndex((k) => Math.abs(k.t - t) <= 1.5 / S.fps);
-    if (i >= 0) { Object.assign(kfs[i], v); S.override = null; scheduleSave('keyframes'); renderKeyframes(); }
+    if (i >= 0) { Object.assign(kfs[i], v); S.override = null; saveTile('keyframes'); renderKeyframes(); }
     else S.override = v;
   }
   S.dirty = true;
@@ -98,15 +111,15 @@ function syncViewControls() {
     if (document.activeElement !== el) el.value = v[k];
     $('#o-' + k).textContent = k === 'distortion' ? v[k].toFixed(2) : `${v[k].toFixed(k === 'fov' ? 0 : 1)}°`;
   }
-  $('#hud-readout').textContent = `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (v.distortion > 0.005 ? `  dist. ${v.distortion.toFixed(2)}` : '') + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
+  $('#hud-readout').textContent = (tileCount() > 1 ? `vue ${S.tile + 1}  ·  ` : '') + `cap ${v.yaw.toFixed(0)}°  incl. ${v.pitch.toFixed(0)}°  champ ${v.fov.toFixed(0)}°` + (v.distortion > 0.005 ? `  dist. ${v.distortion.toFixed(2)}` : '') + (S.override ? '  ·  vue modifiée (◆ pour l\'enregistrer)' : '');
 }
 
 function setProjectionUI() {
-  const [lo, hi] = fovRange(projection(), S.st ? S.st.view.distortion || 0 : 0);
+  const [lo, hi] = fovRange(projection(), S.st ? baseView().distortion || 0 : 0);
   const f = $('#v-fov'); f.min = lo; f.max = hi;
   $('#proj').value = projection();
   $('#f-dist').hidden = projection() !== 'flat';
-  viewer && viewer.setProjection(projection());
+  viewer && viewer.setProjection(S.st ? S.st.projection : 'flat');
 }
 
 // ---------------------------------------------------------------- stabilisation (aperçu)
@@ -147,10 +160,16 @@ function frameLoop() {
     const tr = S.st.trim;
     if (moving && tr.end > 0 && t >= tr.end) { video.currentTime = tr.start; }
     if (S.videoReady) viewer.uploadFrame();
-    const v = currentView(t);
-    viewer.setView(v);
+    const views = Array.from({ length: tileCount() }, (_, i) => tileViewAt(i, t));
+    viewer.setView(views[0]);
+    viewer.setProjection(S.st.projection);
+    viewer.setLayout(S.st.multi.layout, S.st.multi.gap, views.slice(1).map((v, j) => ({
+      projection: tileData(j + 1).projection, view: v, matrix: yprToMatrix(v.yaw, v.pitch, v.roll),
+    })));
     viewer.setStabMatrix(stabMatrix(t));
-    viewer.draw(yprToMatrix(v.yaw, v.pitch, v.roll));
+    viewer.draw(yprToMatrix(views[0].yaw, views[0].pitch, views[0].roll));
+    updateTileOutline();
+    if (tileCount() > 1 && performance.now() - S.listAt > 300 && $('#pane-views').classList.contains('active')) { S.listAt = performance.now(); renderTileList(); }
     updateTimeUI();
     syncViewControls();
     S.dirty = false;
@@ -199,6 +218,8 @@ async function openProject(path) {
 
 function adoptProject(p) {
   S.proj = p; S.st = p.state; S.dur = p.source.duration; S.fps = p.source.fps; S.override = null;
+  S.tile = 0; S.selKf = -1;
+  S.st.multi = multiWithDefaults(S.st.multi);
   S.videoReady = false;
   const src = p.source, [w, h] = src.lens_size;
   const dims = src.layout === 'equirect' ? `${w}×${h}` : `2 × ${w}×${h}`;
@@ -305,7 +326,7 @@ function setTrim(which) {
 function renderKeyframes() {
   const layer = $('#kf-layer'), list = $('#kf-list');
   layer.textContent = ''; list.textContent = '';
-  const kfs = S.st ? S.st.keyframes : [];
+  const kfs = S.st ? tileData().keyframes : [];
   $('#kf-empty').hidden = kfs.length > 0;
   kfs.forEach((k, i) => {
     const m = document.createElement('div');
@@ -319,7 +340,7 @@ function renderKeyframes() {
       if (!m._drag) return;
       k.t = timeFromEvent(e); m.style.left = (k.t / S.dur) * 100 + '%'; seek(k.t);
     });
-    m.addEventListener('pointerup', () => { m._drag = false; S.st.keyframes.sort((a, b) => a.t - b.t); scheduleSave('keyframes'); renderKeyframes(); });
+    m.addEventListener('pointerup', () => { m._drag = false; kfs.sort((a, b) => a.t - b.t); saveTile('keyframes'); renderKeyframes(); });
     layer.appendChild(m);
 
     const li = document.createElement('li');
@@ -329,8 +350,8 @@ function renderKeyframes() {
     info.append(t, ` — cap ${k.yaw.toFixed(0)}° · incl. ${k.pitch.toFixed(0)}° · champ ${k.fov.toFixed(0)}°` + (k.distortion > 0.005 ? ` · dist. ${k.distortion.toFixed(2)}` : ''));
     const act = document.createElement('div'); act.className = 'actions';
     const bGo = btn('Aller', () => { S.selKf = i; seek(k.t); renderKeyframes(); });
-    const bUp = btn('Mettre à jour', () => { const v = currentView(S.t); Object.assign(k, v, { t: k.t }); scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }, 'Remplace ce keyframe par la vue affichée');
-    const bDel = btn('✕', () => { S.st.keyframes.splice(i, 1); S.selKf = -1; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }, 'Supprimer');
+    const bUp = btn('Mettre à jour', () => { const v = currentView(S.t); Object.assign(k, v, { t: k.t }); saveTile('keyframes'); renderKeyframes(); S.dirty = true; }, 'Remplace ce keyframe par la vue affichée');
+    const bDel = btn('✕', () => { kfs.splice(i, 1); S.selKf = -1; saveTile('keyframes'); renderKeyframes(); S.dirty = true; }, 'Supprimer');
     act.append(bGo, bUp, bDel);
     li.append(info, act);
     list.appendChild(li);
@@ -345,23 +366,34 @@ function btn(label, fn, title) {
 function addKeyframe() {
   if (!S.st) return;
   const v = { ...currentView(S.t) };
-  const kfs = S.st.keyframes;
+  const kfs = tileData().keyframes;
   const i = kfs.findIndex((k) => Math.abs(k.t - S.t) <= 1.5 / S.fps);
   const kf = { t: S.t, ...v };
   if (i >= 0) { kfs[i] = kf; S.selKf = i; } else { kfs.push(kf); kfs.sort((a, b) => a.t - b.t); S.selKf = kfs.indexOf(kf); }
-  S.override = null; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true;
+  S.override = null; saveTile('keyframes'); renderKeyframes(); S.dirty = true;
 }
 $('#btn-kf').addEventListener('click', addKeyframe);
 $('#btn-kf-clear').addEventListener('click', () => {
-  if (!S.st || !S.st.keyframes.length) return;
-  if (confirm('Supprimer tous les keyframes ?')) { S.st.keyframes = []; S.selKf = -1; scheduleSave('keyframes'); renderKeyframes(); S.dirty = true; }
+  if (!S.st || !tileData().keyframes.length) return;
+  if (confirm('Supprimer tous les keyframes ?')) { tileData().keyframes = []; S.selKf = -1; saveTile('keyframes'); renderKeyframes(); S.dirty = true; }
 });
 
 // ---------------------------------------------------------------- interaction avec l'image
 const canvas = $('#gl');
 let drag = null;
+// Vue sous le pointeur (la dernière rencontrée : une incrustation recouvre la vue principale).
+function tileAtPointer(e) {
+  const n = tileCount();
+  if (n === 1) return 0;
+  const r = canvas.getBoundingClientRect();
+  const rects = layoutRects(S.st.multi.layout, r.width, r.height, S.st.multi.gap);
+  let hit = -1;
+  rects.forEach((q, i) => { if (e.clientX - r.left >= q.x && e.clientX - r.left < q.x + q.w && e.clientY - r.top >= q.y && e.clientY - r.top < q.y + q.h) hit = i; });
+  return hit < 0 ? S.tile : hit;
+}
 canvas.addEventListener('pointerdown', (e) => {
   if (!S.st) return;
+  selectTile(tileAtPointer(e));
   canvas.setPointerCapture(e.pointerId);
   drag = { x: e.clientX, y: e.clientY };
   canvas.classList.add('dragging');
@@ -382,9 +414,10 @@ canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('wheel', (e) => {
   if (!S.st) return;
   e.preventDefault();
+  selectTile(tileAtPointer(e));
   editView((v) => { v.fov *= Math.exp(e.deltaY * 0.0012); return v; });
 }, { passive: false });
-canvas.addEventListener('dblclick', resetView);
+canvas.addEventListener('dblclick', (e) => { selectTile(tileAtPointer(e)); resetView(); });
 $('#btn-reset-view').addEventListener('click', resetView);
 function resetView() {
   editView((v) => ({ ...v, yaw: 0, pitch: 0, roll: 0, fov: DEFAULT_FOV[projection()], distortion: 0 }));
@@ -393,19 +426,20 @@ for (const [k, sel] of Object.entries(VIEW_CTRL)) {
   $(sel).addEventListener('input', (e) => editView((v) => { v[k] = parseFloat(e.target.value); return v; }));
 }
 function setProjection(p) {
-  S.st.projection = p;
-  S.st.view.fov = DEFAULT_FOV[p];
-  S.st.view.distortion = 0;
-  if (p === 'planet') S.st.view.pitch = -90;
-  else if (S.st.view.pitch === -90) S.st.view.pitch = 0;
+  const d = tileData();
+  d.projection = p;
+  d.view.fov = DEFAULT_FOV[p];
+  d.view.distortion = 0;
+  if (p === 'planet') d.view.pitch = -90;
+  else if (d.view.pitch === -90) d.view.pitch = 0;
   S.override = null;
   setProjectionUI();
-  S.st.keyframes.forEach((k) => {
+  d.keyframes.forEach((k) => {
     const [lo, hi] = fovRange(p, k.distortion || 0);
     k.fov = Math.min(hi, Math.max(lo, k.fov));
     if (p !== 'flat') k.distortion = 0;
   });
-  scheduleSave('projection', 'view', 'keyframes'); renderKeyframes(); S.dirty = true; updateExportSummary();
+  saveTile('projection', 'view', 'keyframes'); renderKeyframes(); renderTileList(); S.dirty = true; updateExportSummary();
 }
 $('#proj').addEventListener('change', (e) => { if (S.st) setProjection(e.target.value); });
 
@@ -426,6 +460,75 @@ function applyPreset(name) {
   editView((v) => ({ ...v, ...fields }));
 }
 $$('#v-presets [data-preset]').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+
+// ---------------------------------------------------------------- plusieurs perspectives
+const LAYOUT_NAMES = { single: 'une vue', side: 'côte à côte', stack: 'haut / bas', pip: 'incrustation', trio: 'une grande et deux petites', quad: 'quatre vues' };
+const PROJECTION_NAMES = { flat: 'plat', fisheye: 'fisheye', planet: 'planète' };
+
+// Complète les vues manquantes de la disposition courante (la disposition peut grandir sans que l'utilisateur les ait créées).
+function ensureTiles() {
+  S.st.multi = multiWithDefaults(S.st.multi);
+  if (S.tile >= tileCount()) S.tile = 0;
+}
+function selectTile(i) {
+  if (!S.st || i === S.tile || i >= tileCount()) return;
+  S.tile = i; S.override = null; S.selKf = -1;
+  setProjectionUI(); renderKeyframes(); renderTileList(); syncViewControls(); S.dirty = true;
+}
+function renderTileList() {
+  if (!S.st) return;
+  const list = $('#tile-list'); list.textContent = '';
+  for (let i = 0; i < tileCount(); i++) {
+    const d = tileData(i), v = interpolateView(d.keyframes, S.t, d.view);
+    const li = document.createElement('li');
+    if (i === S.tile) li.className = 'sel';
+    const info = document.createElement('div');
+    const name = document.createElement('span'); name.className = 't'; name.textContent = `Vue ${i + 1}`;
+    info.append(name, ` — ${PROJECTION_NAMES[d.projection]} · cap ${v.yaw.toFixed(0)}° · champ ${v.fov.toFixed(0)}°` + (d.keyframes.length ? ` · ${d.keyframes.length} keyframe(s)` : ''));
+    const act = document.createElement('div'); act.className = 'actions';
+    act.append(btn(i === S.tile ? 'Modifiée' : 'Modifier', () => selectTile(i), 'Les réglages du panneau Recadrage et les keyframes s\'appliquent à cette vue'));
+    li.append(info, act);
+    list.appendChild(li);
+  }
+  $('#views-active').textContent = tileCount() > 1 ? `vue ${S.tile + 1} sur ${tileCount()}` : '';
+}
+function syncLayoutControls() {
+  const m = S.st.multi;
+  $('#m-layout').value = m.layout;
+  $('#f-m-gap').hidden = m.layout === 'single' || m.layout === 'pip';
+  if (document.activeElement !== $('#m-gap')) $('#m-gap').value = m.gap;
+  $('#m-gap').parentElement.querySelector('output').textContent = `${m.gap} px`;
+  renderTileList();
+}
+// Une vue que l'utilisateur n'a pas touchée : celle que la disposition propose par défaut.
+function isUntouchedTile(v, index, count) {
+  const d = defaultTileView(index, count);
+  return v.projection === d.projection && !v.keyframes.length && ['yaw', 'pitch', 'roll', 'fov', 'distortion'].every((k) => (v.view[k] || 0) === d.view[k]);
+}
+function setLayout(layout) {
+  // les vues pas encore modifiées se répartissent à nouveau sur le tour selon le nombre de vues de la nouvelle disposition
+  const oldCount = tileCount(), newCount = LAYOUT_TILES[layout] || 1;
+  S.st.multi.views.forEach((v, j) => { if (isUntouchedTile(v, j + 1, oldCount)) S.st.multi.views[j] = defaultTileView(j + 1, newCount); });
+  S.st.multi.layout = layout;
+  ensureTiles(); syncLayoutControls(); setProjectionUI(); renderKeyframes(); updateTileOutline();
+  scheduleSave('multi'); S.dirty = true; updateExportSummary();
+}
+$('#m-layout').addEventListener('change', (e) => { if (S.st) setLayout(e.target.value); });
+$('#m-gap').addEventListener('input', (e) => {
+  if (!S.st) return;
+  S.st.multi.gap = Math.round(parseFloat(e.target.value) / 4) * 4;
+  syncLayoutControls(); scheduleSave('multi'); S.dirty = true;
+});
+// Cadre de la vue en cours de modification, par-dessus l'aperçu (seulement s'il y en a plusieurs).
+function updateTileOutline() {
+  const box = $('#tile-outline');
+  if (!S.st || tileCount() < 2) { box.hidden = true; return; }
+  const k = canvas.clientWidth / canvas.width;
+  const r = layoutRects(S.st.multi.layout, canvas.width, canvas.height, S.st.multi.gap)[S.tile];
+  if (!r) { box.hidden = true; return; }
+  box.hidden = false;
+  box.style.cssText = `left:${r.x * k}px;top:${r.y * k}px;width:${r.w * k}px;height:${r.h * k}px`;
+}
 
 // ---------------------------------------------------------------- panneau : onglets
 $$('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
@@ -449,6 +552,7 @@ function bindStateToControls() {
   }
   for (const k of Object.keys(GRADE_DEFAULT)) setGradeControl(k);
   syncStickControls();
+  syncLayoutControls();
   updateAnalysisStatus();
 }
 function setOut(sel, v, unit) {
@@ -482,10 +586,14 @@ $('#btn-center-here').addEventListener('click', () => {
   // la vue actuelle devient « l'avant » : on décale l'orientation du cap affiché
   const v = currentView(S.t);
   S.st.orientation.yaw = wrap180(S.st.orientation.yaw + v.yaw);
-  S.st.view.yaw = 0;
-  S.st.keyframes.forEach((k) => { k.yaw = wrap180(k.yaw - v.yaw); });
+  // toutes les vues suivent le recentrage ; la vue affichée devient « l'avant »
+  for (let i = 0; i < tileCount(); i++) {
+    const d = tileData(i);
+    d.view.yaw = i === S.tile ? 0 : wrap180(d.view.yaw - v.yaw);
+    d.keyframes.forEach((k) => { k.yaw = wrap180(k.yaw - v.yaw); });
+  }
   S.override = null;
-  bindStateToControls(); scheduleSave('orientation', 'view', 'keyframes'); renderKeyframes(); fetchStab();
+  bindStateToControls(); scheduleSave('orientation', 'view', 'keyframes', 'multi'); renderKeyframes(); fetchStab();
 });
 $('#btn-analyze').addEventListener('click', async () => {
   try { await api('POST', `/api/project/${S.proj.id}/analyze`, {}); selectTab('jobs'); refreshJobs(); } catch (e) { toast(e.message, true); }
@@ -591,7 +699,7 @@ function exportSettings() {
   const mode = $('#e-mode').value;
   const s = {
     mode, fps: +$('#e-fps').value, speed: +$('#e-speed').value, codec: $('#e-codec').value, crf: +$('#e-crf').value,
-    audio: $('#e-audio').checked, projection: projection(),
+    audio: $('#e-audio').checked, projection: S.st.projection,
   };
   if (mode === 'reframe') { const [w, h] = $('#e-size').value.split('x').map(Number); s.width = w; s.height = h; }
   else s.stitch_width = +$('#e-size360').value;
@@ -608,7 +716,10 @@ function updateExportSummary() {
   const b = document.createElement('b'); b.textContent = `${fmtTime(tr.start)} → ${fmtTime(end)}`;
   box.append('Plage exportée : ', b, ` (${(dur / sp).toFixed(1)} s en sortie)`);
   box.append(document.createElement('br'), `Stabilisation : ${({ off: 'désactivée', smooth: 'lissage', lock: 'verrouillage', horizon: 'horizon' })[stab]} · ${S.st.keyframes.length} keyframe(s)`);
-  if ($('#e-mode').value === 'reframe') box.append(document.createElement('br'), `Projection : ${({ flat: 'plate', fisheye: 'fisheye', planet: 'petite planète' })[projection()]}`);
+  if ($('#e-mode').value === 'reframe') {
+    box.append(document.createElement('br'), `Projection : ${({ flat: 'plate', fisheye: 'fisheye', planet: 'petite planète' })[S.st.projection]}`);
+    if (tileCount() > 1) box.append(document.createElement('br'), `Disposition : ${LAYOUT_NAMES[S.st.multi.layout]} (${tileCount()} vues)`);
+  }
 }
 $$('#pane-export select, #pane-export input').forEach((el) => el.addEventListener('change', updateExportSummary));
 $('#btn-export').addEventListener('click', async () => {
@@ -625,7 +736,7 @@ $('#btn-snap').addEventListener('click', async () => {
   try {
     const mode = 'reframe';
     const sz = $('#e-size').value.split('x').map(Number);
-    const r = await api('POST', `/api/project/${S.proj.id}/snapshot`, { t: S.t, settings: { mode, width: sz[0], height: sz[1], projection: projection() }, directory: $('#e-dir').value.trim() || undefined });
+    const r = await api('POST', `/api/project/${S.proj.id}/snapshot`, { t: S.t, settings: { mode, width: sz[0], height: sz[1], projection: S.st.projection }, directory: $('#e-dir').value.trim() || undefined });
     toast('Image enregistrée : ' + r.path);
   } catch (e) { toast(e.message, true); }
 });
