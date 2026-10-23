@@ -44,11 +44,12 @@ export function interpolateView(keyframes, t, base) {
     const a = k[i], b = k[i + 1];
     if (a.t <= t && t <= b.t) {
       const span = b.t - a.t;
-      const u = span > 0 ? smooth((t - a.t) / span) : 1;
+      const x = span > 0 ? (t - a.t) / span : 1;
+      const u = a.ease === 'linear' ? Math.min(1, Math.max(0, x)) : smooth(x);
       const o = {};
       for (const f of VIEW_FIELDS) {
         const va = a[f] ?? def[f], vb = b[f] ?? def[f];
-        o[f] = f === 'yaw' ? va + wrap180(vb - va) * u : va + (vb - va) * u;
+        o[f] = f === 'yaw' || f === 'roll' ? va + wrap180(vb - va) * u : va + (vb - va) * u;
       }
       return o;
     }

@@ -529,7 +529,7 @@ mod tests {
         let p = open(home.path());
         let s = p
             .update_state(&json!({"keyframes": [
-                {"t": 2.0, "yaw": 10, "ease": "linear"},
+                {"t": 2.0, "yaw": 10, "ease": "linear", "zoom": 3},
                 {"t": 0.5, "fov": 50.0, "pitch": -5},
             ]}))
             .unwrap();
@@ -537,7 +537,9 @@ mod tests {
         assert_eq!((s.keyframes[0].t, s.keyframes[0].fov, s.keyframes[0].yaw), (0.5, Some(50.0), None));
         assert_eq!((s.keyframes[1].t, s.keyframes[1].yaw), (2.0, Some(10.0)));
         let json = serde_json::to_value(&s.keyframes).unwrap();
-        assert!(json[1].get("ease").is_none() && json[1].get("pitch").is_none());
+        assert!(json[1].get("zoom").is_none() && json[1].get("pitch").is_none(), "champs inconnus ignorés");
+        assert_eq!(json[1]["ease"], "linear", "l'interpolation d'un keyframe est conservée");
+        assert!(json[0].get("ease").is_none());
         // un patch invalide est refusé, l'état et le fichier restent intacts
         let before = std::fs::read_to_string(p.state_file()).unwrap();
         for bad in [
@@ -551,6 +553,7 @@ mod tests {
             json!({"stick": {"radius": 99}}),
             json!({"multi": {"layout": "mosaique"}}),
             json!({"multi": {"gap": 6}}),
+            json!({"keyframes": [{"t": 1, "ease": "rebond"}]}),
             json!({"multi": {"views": [{"projection": "cube"}]}}),
             json!({"grade": {"saturation": "vive"}}),
         ] {

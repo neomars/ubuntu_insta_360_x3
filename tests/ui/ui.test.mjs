@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, startApp } from './helpers.mjs';
+import { canvasStats, canvasThumb, launchBrowser, makeDemo, meanAbsDiff, openAndWait, openUi, previewVsExport, settle, sleep, startApp, waitFor } from './helpers.mjs';
+
+/** Attend la fin d'un enregistrement du cadrage (arrêt automatique en fin de plage). */
+const waitForRecEnd = (page) => waitFor(page, () => window.__x3.S.rec === null, { timeout: 15000 });
 
 describe('interface X3 Studio Local', () => {
   let app, browser, clip;
@@ -684,6 +687,105 @@ describe('interface X3 Studio Local', () => {
       assert.ok(await page.locator('#tile-outline').isHidden());
       await redraw();
       await parity('retour à une seule vue');
+    });
+  });
+
+  it("enregistre le cadrage pendant la lecture : keyframes linéaires qui remplacent la plage, annulation", async () => {
+    await withPage(async (page) => {
+      await openAndWait(page, fresh('cadrage'));
+      const kf = (t, yaw) => ({ t, yaw, pitch: 0, roll: 0, fov: 90, distortion: 0 });
+      await page.evaluate(async ([a, b, c]) => {
+        const X = window.__x3, S = X.S;
+        S.st.projection = 'flat'; S.st.view = { yaw: 0, pitch: 0, roll: 0, fov: 90, distortion: 0 };
+        S.st.keyframes = [a, b, c]; S.st.stabilization.mode = 'off'; S.override = null;
+        for (const k of ['projection', 'view', 'keyframes', 'stabilization']) S.pending.add(k);
+        await X.flushSave(); await X.fetchStab(); X.seek(0.3); S.dirty = true;
+      }, [kf(0, -30), kf(1.0, 0), kf(2.4, 10)]);
+      await settle(page);
+      assert.ok(await page.locator('#hud-rec').isHidden());
+      assert.ok(await page.locator('#btn-rec-undo').isHidden());
+      // enregistrement : la vue tourne de 1,5° toutes les 40 ms pendant ~1,2 s de lecture
+      await page.click('#btn-rec');
+      assert.ok(await page.locator('#hud-rec').isVisible());
+      assert.equal(await page.getAttribute('#btn-rec', 'aria-pressed'), 'true');
+      const t0 = await page.evaluate('window.__x3.S.rec.samples[0].t');
+      assert.ok(Math.abs(t0 - 0.3) < 0.06, `départ à ${t0}`);
+      await page.evaluate(async () => {
+        const X = window.__x3;
+        for (let i = 0; i < 30; i++) { X.editView((v) => ({ ...v, yaw: v.yaw + 1.5 })); await new Promise((r) => setTimeout(r, 40)); }
+      });
+      const live = await page.evaluate('window.__x3.S.rec.view.yaw');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 3, 'rien n\'est enregistré avant l\'arrêt');
+      assert.ok(await page.evaluate('!document.getElementById("video").paused'), 'la vidéo est en lecture');
+      await page.click('#btn-rec');
+      assert.equal(await page.evaluate('window.__x3.S.rec'), null);
+      assert.ok(await page.evaluate('document.getElementById("video").paused'));
+      assert.ok(await page.locator('#hud-rec').isHidden());
+      const kfs = await page.evaluate('window.__x3.S.st.keyframes');
+      const rec = kfs.filter((k) => k.ease === 'linear');
+      assert.ok(rec.length >= 2 && rec.length <= 16, `${rec.length} keyframes enregistrés`);
+      assert.ok(Math.abs(rec[0].t - 0.3) < 0.1 && rec[rec.length - 1].t > 1.0 && rec[rec.length - 1].t < 2.2, JSON.stringify(rec.map((k) => k.t)));
+      assert.ok(rec.every((k, i) => i === 0 || k.yaw > rec[i - 1].yaw), 'la vue tourne toujours dans le même sens');
+      assert.ok(Math.abs(rec[0].yaw - (-30 * (1 - 0.216))) < 2.5, `cap de départ ${rec[0].yaw} (vue interpolée à 0,3 s)`);
+      assert.ok(Math.abs(rec[rec.length - 1].yaw - live) < 3, `cap final ${rec[rec.length - 1].yaw} contre vue filmée ${live}`);
+      // les keyframes de la plage ont été remplacés (celui de 1,0 s a disparu), ceux d'avant et d'après sont conservés
+      assert.ok(kfs.some((k) => k.t === 0 && k.yaw === -30) && kfs.some((k) => k.t === 2.4 && k.yaw === 10));
+      assert.ok(!kfs.some((k) => k.t === 1.0), 'le keyframe de la plage enregistrée est remplacé');
+      assert.ok(kfs.every((k, i) => i === 0 || k.t >= kfs[i - 1].t), 'triés');
+      assert.ok(await page.locator('#btn-rec-undo').isVisible());
+      assert.equal(await page.locator('.kf').count(), kfs.length);
+      // enregistré sur disque, interpolation linéaire conservée
+      await page.evaluate('window.__x3.flushSave()');
+      await sleep(300);
+      const pid = await page.evaluate('window.__x3.S.proj.id');
+      const saved = JSON.parse(readFileSync(path.join(app.home, 'projects', pid, 'state.json'), 'utf8'));
+      assert.equal(saved.keyframes.filter((k) => k.ease === 'linear').length, rec.length);
+      // à mi-parcours d'un segment linéaire, l'aperçu et l'export concordent (un smoothstep donnerait une autre vue)
+      const mid = (rec[0].t + rec[1].t) / 2;
+      await page.evaluate((t) => { window.__x3.seek(t); window.__x3.S.dirty = true; }, mid);
+      await settle(page); await sleep(500);
+      const want = (rec[0].yaw + rec[1].yaw) / 2;
+      const got = await page.evaluate('window.__x3.viewer.view.yaw');
+      assert.ok(Math.abs(got - want) < 1.0, `à ${mid.toFixed(2)} s : cap ${got} au lieu de ${want} (interpolation linéaire)`);
+      const { diff } = await previewVsExport(page);
+      assert.ok(diff < 0.045, `l'aperçu et l'export diffèrent (${diff.toFixed(4)})`);
+      // annuler rend les keyframes d'origine
+      await page.click('#btn-rec-undo');
+      assert.deepEqual((await page.evaluate('window.__x3.S.st.keyframes')).map((k) => [k.t, k.yaw]), [[0, -30], [1, 0], [2.4, 10]]);
+      assert.ok(await page.locator('#btn-rec-undo').isHidden());
+      // un arrêt immédiat n'enregistre rien et ne touche à rien
+      await page.evaluate(() => { const b = document.getElementById('btn-rec'); b.click(); b.click(); });
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 3);
+      assert.match(await page.innerText('#toast'), /Rien à enregistrer/);
+      // la touche R lance puis arrête, et une fin de plage arrête aussi l'enregistrement
+      await page.evaluate(() => { window.__x3.S.st.trim = { start: 0, end: 0.9 }; window.__x3.seek(0.5); });
+      await settle(page);
+      await page.keyboard.press('r');
+      assert.ok(await page.evaluate('window.__x3.S.rec !== null'));
+      await waitForRecEnd(page);
+      assert.equal(await page.evaluate('window.__x3.S.rec'), null, 'la fin de la plage arrête l\'enregistrement');
+      const t1 = (await page.evaluate('window.__x3.S.st.keyframes')).filter((k) => k.ease === 'linear');
+      assert.ok(t1.length >= 2 && t1[t1.length - 1].t <= 1.05, JSON.stringify(t1.map((k) => k.t)));
+      await page.evaluate(() => { window.__x3.S.st.trim = { start: 0, end: 0 }; window.__x3.S.pending.add('trim'); });
+      // deuxième vue d'une disposition : ses keyframes sont enregistrés pour elle seule
+      await page.evaluate(async () => {
+        const X = window.__x3, S = X.S;
+        S.st.keyframes = []; S.pending.add('keyframes');
+        S.st.multi = { layout: 'side', gap: 0, views: [{ projection: 'flat', view: { yaw: 90, pitch: 0, roll: 0, fov: 90, distortion: 0 }, keyframes: [] }] };
+        S.pending.add('multi'); S.tile = 1; S.override = null; S.dirty = true;
+        await X.flushSave(); X.seek(0.2);
+      });
+      await settle(page);
+      await page.click('#btn-rec');
+      await page.evaluate(async () => {
+        const X = window.__x3;
+        for (let i = 0; i < 20; i++) { X.editView((v) => ({ ...v, yaw: v.yaw - 2 })); await new Promise((r) => setTimeout(r, 40)); }
+      });
+      await page.click('#btn-rec');
+      const two = await page.evaluate('window.__x3.S.st.multi.views[0].keyframes');
+      assert.ok(two.length >= 2 && two.every((k) => k.ease === 'linear'), JSON.stringify(two));
+      assert.ok(two[0].yaw > two[two.length - 1].yaw, 'la vue 2 a tourné vers la gauche');
+      assert.equal(await page.evaluate('window.__x3.S.st.keyframes.length'), 0, 'la vue 1 n\'est pas touchée');
     });
   });
 });

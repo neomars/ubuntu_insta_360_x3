@@ -1,6 +1,7 @@
 // Interface de X3 Studio Local : tout passe par l'API du serveur local (127.0.0.1).
 import { DEFAULT_FOV, FOV_RANGE, GRADE_DEFAULT, IDENTITY, LAYOUT_TILES, defaultTileView, MAX_DISTORTION, STICK_DEFAULT, fmtTime, fovRange, gradeWithDefaults, interpolateView, layoutRects, mul3, multiWithDefaults, stickWithDefaults, wrap180, yprToMatrix } from './geometry.js';
 import { Viewer } from './viewer.js';
+import { replaceKeyframes, simplifySamples } from './recorder.js';
 
 const TOKEN = document.querySelector('meta[name=x3-token]').content;
 const $ = (s, r = document) => r.querySelector(s);
@@ -32,6 +33,8 @@ const S = {
   proj: null, st: null, t: 0, dur: 0, fps: 30,
   tile: 0,                   // vue en cours de modification (0 = la vue du projet, 1… = les vues supplémentaires)
   listAt: 0,                 // dernier rafraîchissement de la liste des vues (ms)
+  rec: null,                 // enregistrement du cadrage en cours : { tile, view, samples, rate }
+  recUndo: null,             // keyframes remplacés par le dernier enregistrement : { tile, keyframes }
   override: null,            // vue modifiée à la main, pas encore enregistrée
   stab: { arr: IDENTITY, n: 1 },
   selKf: -1, dirty: true, lastT: -1, info: null, jobs: [], saveTimer: null, pending: new Set(),
@@ -67,11 +70,13 @@ function saveTile(...fields) { if (S.tile === 0) scheduleSave(...fields); else s
 function projection() { return S.st ? tileData().projection : 'flat'; }
 function baseView() { return tileData().view; }
 function currentView(t) {
+  if (S.rec && S.rec.tile === S.tile) return S.rec.view;
   if (S.override) return S.override;
   return interpolateView(tileData().keyframes, t, baseView());
 }
 // Vue de la vue n° `i` à l'instant `t` (la vue en cours de modification peut être modifiée à la main, sans keyframe).
 function tileViewAt(i, t) {
+  if (S.rec && i === S.rec.tile) return S.rec.view;
   if (i === S.tile && S.override) return S.override;
   const d = tileData(i);
   return interpolateView(d.keyframes, t, d.view);
@@ -87,6 +92,11 @@ function clampView(v) {
 }
 function editView(patchFn) {
   if (!S.st) return;
+  if (S.rec) {   // pendant l'enregistrement, la vue modifiée est celle qu'on filme : rien n'est enregistré avant l'arrêt
+    S.rec.view = clampView(patchFn({ ...S.rec.view }));
+    S.dirty = true; syncViewControls();
+    return;
+  }
   const t = S.t, v = clampView(patchFn({ ...currentView(t) }));
   const d = tileData(), kfs = d.keyframes;
   if (!kfs.length) {
@@ -158,7 +168,11 @@ function frameLoop() {
     if (moving && S.override) S.override = null;
     S.t = t; S.lastT = t;
     const tr = S.st.trim;
-    if (moving && tr.end > 0 && t >= tr.end) { video.currentTime = tr.start; }
+    if (moving && S.rec) {
+      const last = S.rec.samples[S.rec.samples.length - 1];
+      if (!last || t > last.t + 1e-4) S.rec.samples.push({ t, ...S.rec.view });
+      if (tr.end > 0 && t >= tr.end) stopRecording();
+    } else if (moving && tr.end > 0 && t >= tr.end) { video.currentTime = tr.start; }
     if (S.videoReady) viewer.uploadFrame();
     const views = Array.from({ length: tileCount() }, (_, i) => tileViewAt(i, t));
     viewer.setView(views[0]);
@@ -201,6 +215,7 @@ function pausedTime() {
 // horodatage, un arrondi (WebM : 1 ms ; 29,97 i/s : l'horodatage n'est jamais exact) ou le décalage de +7 ms que
 // FFmpeg 4.4 (Ubuntu 22.04) donne à la piste vidéo feraient afficher l'image précédente.
 function seek(t) {
+  if (S.rec) stopRecording();
   const k = Math.min(Math.max(0, Math.round(t * S.fps)), lastFrame());
   video.currentTime = (k + 0.5) / S.fps;
   S.dirty = true;
@@ -218,7 +233,7 @@ async function openProject(path) {
 
 function adoptProject(p) {
   S.proj = p; S.st = p.state; S.dur = p.source.duration; S.fps = p.source.fps; S.override = null;
-  S.tile = 0; S.selKf = -1;
+  S.tile = 0; S.selKf = -1; S.rec = null; S.recUndo = null;
   S.st.multi = multiWithDefaults(S.st.multi);
   S.videoReady = false;
   const src = p.source, [w, h] = src.lens_size;
@@ -255,6 +270,7 @@ function loadVideoIfReady() {
 }
 video.addEventListener('loadeddata', () => { S.videoReady = true; S.dirty = true; seek(Math.max(0, S.st.trim.start)); });
 video.addEventListener('seeked', () => { S.dirty = true; });
+video.addEventListener('ended', () => { if (S.rec) stopRecording(); });
 video.addEventListener('timeupdate', () => { if (video.paused) S.dirty = true; });
 // L'aperçu ne se lit pas : dire pourquoi (navigateur sans VP9, serveur qui refuse le fichier, fichier illisible)
 // plutôt que d'accuser le VP9 dans tous les cas.
@@ -284,6 +300,7 @@ async function playbackErrorMessage(src, detail) {
 $('#btn-play').addEventListener('click', togglePlay);
 function togglePlay() {
   if (!S.videoReady) return;
+  if (S.rec) { stopRecording(); return; }
   if (video.paused) {
     const tr = S.st.trim;
     if (tr.end > 0 && video.currentTime >= tr.end) video.currentTime = tr.start;
@@ -377,6 +394,64 @@ $('#btn-kf-clear').addEventListener('click', () => {
   if (!S.st || !tileData().keyframes.length) return;
   if (confirm('Supprimer tous les keyframes ?')) { tileData().keyframes = []; S.selKf = -1; saveTile('keyframes'); renderKeyframes(); S.dirty = true; }
 });
+
+// ---------------------------------------------------------------- enregistrement du cadrage
+// On lit la vidéo et on oriente la vue à la souris : à l'arrêt, le tracé devient des keyframes (linéaires) qui
+// remplacent ceux de la plage enregistrée, pour la vue sélectionnée.
+function startRecording() {
+  if (!S.videoReady || !S.st) return;
+  const tr = S.st.trim;
+  if (tr.end > 0 && video.currentTime >= tr.end - 0.05) video.currentTime = tr.start;
+  const rate = parseFloat($('#rec-speed').value) || 1;
+  const view = clampView({ distortion: 0, ...currentView(S.t) });
+  S.rec = { tile: S.tile, view, samples: [{ t: video.currentTime || 0, ...view }], rate };
+  S.override = null;
+  video.playbackRate = rate;
+  video.muted = true;
+  video.play().catch(() => stopRecording());
+  updateRecUI(); S.dirty = true;
+}
+function stopRecording() {
+  const rec = S.rec;
+  if (!rec) return;
+  S.rec = null;
+  video.pause();
+  video.playbackRate = 1;
+  const keyframes = simplifySamples(rec.samples);
+  if (keyframes.length >= 2) {
+    const d = tileData(rec.tile);
+    S.recUndo = { tile: rec.tile, keyframes: d.keyframes.map((k) => ({ ...k })) };
+    d.keyframes = replaceKeyframes(d.keyframes, keyframes, keyframes[0].t, keyframes[keyframes.length - 1].t);
+    d.view = { ...d.view, ...rec.view };
+    if (S.tile === rec.tile) S.selKf = -1;
+    if (S.tile === 0) scheduleSave('keyframes', 'view'); else scheduleSave('multi');
+    toast(`Cadrage enregistré : ${keyframes.length} keyframes de ${fmtTime(keyframes[0].t)} à ${fmtTime(keyframes[keyframes.length - 1].t)}.`);
+  } else {
+    toast('Rien à enregistrer : lancez l\'enregistrement puis orientez la vue pendant la lecture.', true);
+  }
+  S.override = null;
+  renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+}
+function undoRecording() {
+  const u = S.recUndo;
+  if (!u || !S.st) return;
+  tileData(u.tile).keyframes = u.keyframes;
+  S.recUndo = null;
+  if (u.tile === 0) scheduleSave('keyframes'); else scheduleSave('multi');
+  S.override = null; S.selKf = -1;
+  renderKeyframes(); renderTileList(); updateRecUI(); S.dirty = true;
+}
+function updateRecUI() {
+  const on = !!S.rec;
+  const b = $('#btn-rec');
+  b.textContent = on ? '■ Arrêter' : '● Cadrage';
+  b.classList.toggle('rec', on);
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  $('#hud-rec').hidden = !on;
+  $('#btn-rec-undo').hidden = !S.recUndo;
+}
+$('#btn-rec').addEventListener('click', () => (S.rec ? stopRecording() : startRecording()));
+$('#btn-rec-undo').addEventListener('click', undoRecording);
 
 // ---------------------------------------------------------------- interaction avec l'image
 const canvas = $('#gl');
@@ -831,6 +906,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowLeft') { e.preventDefault(); seek(S.t - (e.shiftKey ? 1 : 1 / S.fps)); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); seek(S.t + (e.shiftKey ? 1 : 1 / S.fps)); }
   else if (e.key === 'k' || e.key === 'K') addKeyframe();
+  else if (e.key === 'r' || e.key === 'R') { if (S.rec) stopRecording(); else startRecording(); }
   else if (e.key === 'i' || e.key === 'I') setTrim('start');
   else if (e.key === 'o' || e.key === 'O') setTrim('end');
 });

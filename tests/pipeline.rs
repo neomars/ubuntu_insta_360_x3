@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use x3studio::calibration::Calibration;
 use x3studio::error::{is_cancelled, is_user_error};
 use x3studio::geometry::{ypr_to_matrix, Mat3, Ypr};
-use x3studio::geometry::{Keyframe, View};
+use x3studio::geometry::{Ease, Keyframe, View};
 use x3studio::grade::Grade;
 use x3studio::media::{probe_source, Layout, Source};
 use x3studio::multi::{layout_rects, Multi, MultiLayout, TileView};
@@ -940,4 +940,41 @@ fn invalid_layouts_are_refused_up_front() {
     };
     let plan = build_plan(&src, &Calibration::default(), &s, &dir.path().join("c.mp4"), None).unwrap();
     assert_eq!(plan.tiles.len(), 1);
+}
+
+/// Keyframes enregistrés (interpolation linéaire) : vitesse constante ; sans cela, départ et arrivée en douceur.
+#[test]
+fn linear_keyframes_move_at_a_constant_speed() {
+    let c = static_clip();
+    let dir = tempfile::tempdir().unwrap();
+    let kf = |t: f64, yaw: f64, ease: Option<Ease>| Keyframe {
+        t,
+        yaw: Some(yaw),
+        fov: Some(80.0),
+        ease,
+        ..Default::default()
+    };
+    let frames_for = |name: &str, ease: Option<Ease>| {
+        let s = fast(ExportSettings {
+            width: 640,
+            height: 360,
+            end: 1.0,
+            keyframes: vec![kf(0.0, 0.0, ease), kf(1.0, 80.0, None)],
+            ..Default::default()
+        });
+        let out = dir.path().join(name);
+        export(&c, &Calibration::default(), &s, &out);
+        read_frames(&out, 640, 360, "rgb24", None, None)
+    };
+    let (linear, smooth) = (frames_for("lin.mp4", Some(Ease::Linear)), frames_for("smooth.mp4", None));
+    let k = 7usize; // t = 0,2333 s
+    let t = k as f64 / 30.0;
+    let (lin_yaw, smooth_yaw) = (80.0 * t, 80.0 * t * t * (3.0 - 2.0 * t));
+    assert!((lin_yaw - smooth_yaw).abs() > 7.0, "le cas discrimine : {lin_yaw:.1}° contre {smooth_yaw:.1}°");
+    let err = |frame: &[u8], yaw: f64| {
+        let want = expected_view(TEX(), "flat", 640, 360, &Mat3::identity(), (yaw, 0.0, 0.0, 80.0));
+        mean_abs_diff(&downscale_rgb(frame, 640, 360, 4).0, &downscale_rgb(&want, 640, 360, 4).0)
+    };
+    assert!(err(&linear[k], lin_yaw) < 9.0 && err(&linear[k], smooth_yaw) > 2.0 * err(&linear[k], lin_yaw));
+    assert!(err(&smooth[k], smooth_yaw) < 9.0 && err(&smooth[k], lin_yaw) > 2.0 * err(&smooth[k], smooth_yaw));
 }

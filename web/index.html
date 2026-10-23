@@ -39,6 +39,7 @@
         <button id="btn-snap" class="btn small" title="Enregistrer l'image affichée en JPEG pleine résolution">Capturer l'image</button>
       </div>
       <div class="hud hud-bl" id="hud-readout" aria-hidden="true"></div>
+      <div class="hud hud-tc" id="hud-rec" hidden>● REC</div>
       <div class="hud hud-br" id="hud-hint">Glisser : orienter · Molette : zoom</div>
     </div>
 
@@ -51,6 +52,7 @@
         <div id="playhead" class="playhead"></div>
       </div>
       <button id="btn-kf" class="btn" title="Ajouter un keyframe avec la vue actuelle (K)">◆ Keyframe</button>
+      <button id="btn-rec" class="btn" title="Lire la vidéo en orientant la vue : le tracé devient des keyframes (R)" aria-pressed="false">● Cadrage</button>
       <button id="btn-in" class="btn" title="Début de l'export (I)">[ Début</button>
       <button id="btn-out" class="btn" title="Fin de l'export (O)">Fin ]</button>
     </div>
@@ -84,6 +86,11 @@
         <button type="button" class="btn small ghost" data-preset="planete" title="Petite planète (animable entre keyframes)">Petite planète</button>
       </div>
       <p class="hint">Sans keyframe, la vue est la même pour toute la vidéo. Placez-vous sur un instant, orientez la vue puis ajoutez un keyframe : la caméra virtuelle se déplace en douceur d'un keyframe au suivant.</p>
+      <h3>Enregistrer le cadrage</h3>
+      <p class="hint">Plus rapide que les keyframes un à un : <b>● Cadrage</b> (ou <kbd>R</kbd>) lance la lecture, orientez la vue à la souris (glisser, molette) en suivant l'action, puis arrêtez. Le tracé devient quelques keyframes qui remplacent ceux de la plage filmée.</p>
+      <div class="field"><label for="rec-speed">Vitesse de lecture pendant l'enregistrement</label>
+        <select id="rec-speed"><option value="0.25">×0,25</option><option value="0.5">×0,5</option><option value="1" selected>×1</option></select></div>
+      <div class="row"><button id="btn-rec-undo" class="btn small" hidden>↶ Annuler le dernier enregistrement</button></div>
       <h3>Keyframes <button id="btn-kf-clear" class="btn small ghost">Tout effacer</button></h3>
       <ul id="kf-list" class="kf-list"></ul>
       <p id="kf-empty" class="hint">Aucun keyframe.</p>

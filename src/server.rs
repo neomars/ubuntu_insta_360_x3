@@ -40,6 +40,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const VIEWER_JS: &str = include_str!("../web/viewer.js");
 const GEOMETRY_JS: &str = include_str!("../web/geometry.js");
+const RECORDER_JS: &str = include_str!("../web/recorder.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
 #[derive(Clone)]
@@ -245,6 +246,9 @@ async fn viewer_js() -> Response {
 }
 async fn geometry_js() -> Response {
     asset("text/javascript; charset=utf-8", GEOMETRY_JS)
+}
+async fn recorder_js() -> Response {
+    asset("text/javascript; charset=utf-8", RECORDER_JS)
 }
 async fn style_css() -> Response {
     asset("text/css; charset=utf-8", STYLE_CSS)
@@ -609,6 +613,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/app.js", get(app_js))
         .route("/viewer.js", get(viewer_js))
         .route("/geometry.js", get(geometry_js))
+        .route("/recorder.js", get(recorder_js))
         .route("/style.css", get(style_css))
         .route("/api/info", get(api_info))
         .route("/api/fs", get(api_fs))

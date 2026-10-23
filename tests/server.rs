@@ -241,8 +241,12 @@ fn index_and_static_files() {
     // fichiers de l'interface
     let js = anon("/app.js", &[]);
     assert!(js.text().contains("createElement") && js.header("content-type").unwrap().starts_with("text/javascript"));
-    for (p, ct) in [("/viewer.js", "text/javascript"), ("/geometry.js", "text/javascript"), ("/style.css", "text/css")]
-    {
+    for (p, ct) in [
+        ("/viewer.js", "text/javascript"),
+        ("/geometry.js", "text/javascript"),
+        ("/recorder.js", "text/javascript"),
+        ("/style.css", "text/css"),
+    ] {
         let r = anon(p, &[]);
         assert!(r.status == 200 && r.header("content-type").unwrap().starts_with(ct) && !r.body.is_empty(), "{p}");
     }
